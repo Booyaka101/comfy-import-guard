@@ -1,7 +1,6 @@
 # PROGRESS: comfy-import-guard
 
-Status: **v1.0.0 shipped to GitHub.** PyPI and the Comfy Registry are blocked on
-credentials the owner must supply. See "Shipping state" below.
+Status: **v1.0.0 published on all three channels.**
 
 Date: 2026-08-12
 
@@ -9,19 +8,27 @@ Date: 2026-08-12
 
 | channel | state |
 | --- | --- |
-| GitHub | **done.** `github.com/Booyaka101/comfy-import-guard`, public, tag `v1.0.0`, release with wheel + sdist attached |
-| CI | **green** on `cc2abb2` (the released commit): pytest 3.10/3.11/3.12/3.13 + publish, verified via the check-runs API |
-| PyPI | **blocked.** No token on this machine (no `~/.pypirc`, no `TWINE_*`). The name is free (`pypi.org/pypi/comfy-import-guard/json` returns 404). Needs `twine upload dist/*` with the owner's token |
-| Comfy Registry | **blocked.** `api.comfy.org/publishers/booyaka101` returns 404, so no publisher is claimed under that id, and no API key exists. Claim the publisher on the Registry site, set `[tool.comfy] PublisherId`, add the `REGISTRY_ACCESS_TOKEN` secret, and the existing workflow publishes on the next version bump |
+| GitHub | **live.** `github.com/Booyaka101/comfy-import-guard`, public, tag `v1.0.0`, release carries the wheel and sdist |
+| CI | **green** on `f7a21fe`: pytest 3.10/3.11/3.12/3.13 plus publish, verified via the check-runs API |
+| PyPI | **live.** `pypi.org/project/comfy-import-guard/1.0.0/`. `pip install comfy-import-guard` into a fresh venv resolves only `comfy-import-guard` |
+| Comfy Registry | **node created, version pending review.** `api.comfy.org/nodes/comfy-import-guard` is `NodeStatusActive` under publisher `booyaka101`; version 1.0.0 is `NodeVersionStatusPending` and `latest_version` is still null, so it is not yet surfaced by ComfyUI-Manager. The registry flips this itself once its scan completes |
 
-The publish workflow ran on the initial push and failed with
-`Option '--token' requires an argument`. Nothing was published. It now skips
-cleanly when the secret is absent, so unconfigured does not mean red CI.
+Two things went wrong and were fixed rather than worked around:
 
-Verified after publishing: `pip install git+https://github.com/Booyaka101/comfy-import-guard`
-into a fresh venv resolves only `comfy-import-guard`, and `check` against the real
-0.19.3 install returns SAFE with exit 0. The `icon.svg` URL in `[tool.comfy]`
-returns HTTP 200.
+- The publish workflow ran on the very first push with no secret set and failed
+  with `Option '--token' requires an argument`. Nothing was published. It now
+  skips when the secret is absent, so unconfigured no longer means red CI.
+- The first sdist shipped a `pyproject.toml` comment claiming the publisher did
+  not exist. By then it did. Rebuilt before anything reached PyPI.
+
+Verified after publishing: the PyPI-installed console script runs `check` against
+the real 0.19.3 install and returns SAFE with exit 0. The `icon.svg` URL in
+`[tool.comfy]` returns HTTP 200.
+
+Credentials are not in this repo. They live in `~/.pypirc` and
+`~/.secrets/secrets.env`, owner-only ACL, loaded with
+`source ~/.secrets/load-secrets.sh`. `~/.gitignore_global` blocks them from ever
+being committed anywhere.
 
 ## Phase 0: resource verification (all passed)
 
@@ -108,11 +115,11 @@ bdcb886a4705a03cf40f4a7226de9fc7c059fc90  "Fix sampler issues for audio with min
 
 ## Next steps if resumed
 
-1. PyPI: `twine upload dist/*` with the owner's token. Artifacts are already built
-   and attached to the v1.0.0 release, so nothing needs rebuilding.
-2. Comfy Registry: claim a publisher, set `[tool.comfy] PublisherId`, add the
-   `REGISTRY_ACCESS_TOKEN` secret. The workflow fires on the next `pyproject.toml`
-   version change.
-3. Distribution: comment the derived compatibility range on the two open issues
+1. Watch the Registry version flip from `NodeVersionStatusPending` to active:
+   `curl -s https://api.comfy.org/nodes/comfy-import-guard/versions`. Nothing to
+   do unless it stalls or comes back rejected.
+2. Distribution: comment the derived compatibility range on the two open issues
    (`Comfy-Org/ComfyUI#11660`, `T8mars/...#1`). The affected users are already
    subscribed there. Owner's own voice per CLAUDE.md.
+3. Future releases: bump `version` in `pyproject.toml`, push, and the registry
+   workflow publishes on its own. PyPI still needs `twine upload dist/*` by hand.
