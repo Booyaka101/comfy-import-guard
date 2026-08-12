@@ -1,7 +1,9 @@
 name: publish to comfy registry
 
 # Runs when pyproject.toml's version changes on main, which is how the Comfy
-# Registry docs recommend triggering a publish.
+# Registry docs recommend triggering a publish. It skips instead of failing
+# until REGISTRY_ACCESS_TOKEN is set, so an unconfigured registry does not mean
+# permanently red CI.
 on:
   push:
     branches: [main]
@@ -15,7 +17,22 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      - name: check for registry token
+        id: guard
+        env:
+          TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "REGISTRY_ACCESS_TOKEN is not set. Skipping publish."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v7
+        if: steps.guard.outputs.ready == 'true'
+
       - uses: Comfy-Org/publish-node-action@main
+        if: steps.guard.outputs.ready == 'true'
         with:
           personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}

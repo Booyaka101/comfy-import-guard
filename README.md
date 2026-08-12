@@ -1,5 +1,7 @@
 # comfy-import-guard
 
+[![tests](https://github.com/Booyaka101/comfy-import-guard/actions/workflows/test.yml/badge.svg)](https://github.com/Booyaka101/comfy-import-guard/actions/workflows/test.yml)
+
 Predicts which of your ComfyUI custom-node packs will die on the next `git pull`,
 and names the commit and PR that killed them.
 

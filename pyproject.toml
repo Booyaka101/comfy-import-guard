@@ -45,6 +45,9 @@ Issues = "https://github.com/Booyaka101/comfy-import-guard/issues"
 comfy-import-guard = "comfy_import_guard.cli:main"
 
 [tool.comfy]
+# No publisher is registered under this id yet; api.comfy.org/publishers/booyaka101
+# returns 404. Claim it on the Registry website, or change this to the id you own,
+# before `comfy node publish` will accept the node.
 PublisherId = "booyaka101"
 DisplayName = "Comfy Import Guard"
 Icon = "https://raw.githubusercontent.com/Booyaka101/comfy-import-guard/main/icon.svg"
