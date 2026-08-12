@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "symbol": "precompute_freqs_cis",
+      "module": "comfy.ldm.lightricks.model",
+      "removed_in_commit": "f2b002372b71cf0671a4cf1fa539e1c386d727e4",
+      "pr": 11632,
+      "removed_on": "2026-01-05T01:58:59-05:00",
+      "subject": "Support the LTXV 2 model. (#11632)",
+      "last_good_tag": "v0.7.0",
+      "first_bad_tag": "v0.8.0",
+      "packs": [
+        "ComfyUI-MagCache",
+        "ComfyUI-TeaCache"
+      ]
+    },
+    {
+      "symbol": "time_shift_slope",
+      "module": "comfy.ldm.minimax.model",
+      "removed_in_commit": "bdcb886a4705a03cf40f4a7226de9fc7c059fc90",
+      "pr": 15243,
+      "removed_on": "2026-08-06T13:36:34-07:00",
+      "subject": "Fix sampler issues for audio with minimax, support more samplers. (#15243)",
+      "last_good_tag": "v0.30.2",
+      "first_bad_tag": "v0.31.0",
+      "packs": [
+        "comfyui-minimax-h3-blockcache-T8"
+      ]
+    }
+  ]
+}

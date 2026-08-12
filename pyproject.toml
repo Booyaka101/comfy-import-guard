@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "comfy-import-guard"
+version = "1.0.0"
+description = "Predict and attribute ComfyUI custom-node import breakage caused by removals in comfy.* internals."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Booyaka101" }]
+keywords = [
+  "comfyui",
+  "custom-nodes",
+  "import-error",
+  "static-analysis",
+  "compatibility",
+  "breaking-changes",
+  "ast",
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Multimedia :: Graphics",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/Booyaka101/comfy-import-guard"
+Issues = "https://github.com/Booyaka101/comfy-import-guard/issues"
+
+[project.scripts]
+comfy-import-guard = "comfy_import_guard.cli:main"
+
+[tool.comfy]
+PublisherId = "booyaka101"
+DisplayName = "Comfy Import Guard"
+Icon = "https://raw.githubusercontent.com/Booyaka101/comfy-import-guard/main/icon.svg"
+requires-comfyui = ">=0.3.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["comfy_import_guard"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"ledger.json" = "comfy_import_guard/ledger.json"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "comfy_import_guard",
+  "tests",
+  "ledger.json",
+  "icon.svg",
+  "README.md",
+  "LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

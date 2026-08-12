@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400" role="img" aria-label="Comfy Import Guard">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2030"/>
+      <stop offset="1" stop-color="#0d1017"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" rx="72" fill="url(#bg)"/>
+  <path d="M200 62 322 108v104c0 74-50 111-122 126-72-15-122-52-122-126V108z"
+        fill="none" stroke="#4fd1c5" stroke-width="16" stroke-linejoin="round"/>
+  <path d="M148 190l-34 32 34 32" fill="none" stroke="#e2e8f0" stroke-width="15"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M252 190l34 32-34 32" fill="none" stroke="#e2e8f0" stroke-width="15"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M222 168l-44 108" fill="none" stroke="#f56565" stroke-width="15" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: pip install .[dev]
+
+      - name: assert zero third-party runtime deps
+        run: |
+          python -c "
+          import importlib.metadata as md
+          runtime = [r for r in (md.requires('comfy-import-guard') or []) if 'extra ==' not in r]
+          assert runtime == [], runtime
+          print('runtime dependencies:', runtime)
+          "
+
+      # The suite resolves against live ComfyUI history and clones it once.
+      - run: python -m pytest tests -q
