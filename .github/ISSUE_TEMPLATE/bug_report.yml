@@ -1,0 +1,44 @@
+name: Bug report
+description: Something didn't work the way it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, and what came back.
+      placeholder: |
+        $ comfy-import-guard check --comfy-dir D:/ComfyUI_windows_portable/ComfyUI
+        Traceback ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: comfy-import-guard version
+      description: Output of `comfy-import-guard --version`
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Python version and OS
+      description: Output of `python --version`, plus your OS.
+      placeholder: Python 3.11.9 on Windows 11
+    validations:
+      required: true
+
+  - type: textarea
+    id: packs
+    attributes:
+      label: Which custom-node packs were involved
+      description: The pack names, and their commits if you have them. Most false positives are specific to one pack's import style.
