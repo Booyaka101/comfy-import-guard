@@ -1,7 +1,20 @@
 # PROGRESS: comfy-import-guard
 
-Status: **v1.1.0 built and verified locally, ready to ship. v1.0.0 remains the
-published version on PyPI and the Comfy Registry.**
+Status: **v1.1.0 SHIPPED on 2026-08-29.**
+
+| channel | state |
+| --- | --- |
+| GitHub | live. PR #4 merged as `5e5129f`, tag `v1.1.0`, release carries the wheel and sdist |
+| CI | green on the exact release commit: 8 checks including pytest 3.10/3.11/3.12/3.13 and CodeQL, read from the check-runs API |
+| PyPI | live. `pypi.org/project/comfy-import-guard/1.1.0/`. Installed from PyPI into a clean venv: resolves only `comfy-import-guard==1.1.0`, console script and the new `blame --param` both work |
+| Comfy Registry | 1.1.0 submitted automatically by the publish workflow (the token is set, so it ran rather than skipping) and sits at `NodeVersionStatusPending`, which is where 1.0.0 also started |
+
+**Needs the owner's attention: version 1.0.0 is now `NodeVersionStatusFlagged`
+on the registry**, and `latest_version` is still null, so ComfyUI-Manager is
+not surfacing this node. The API exposes no reason field. This predates 1.1.0
+and is not caused by it. Worth asking Comfy-Org what the flag is, since a
+package that shells out to `git` and reads other packs' source is the kind of
+thing an automated scan can misread.
 
 Date: 2026-08-29
 
