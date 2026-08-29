@@ -5,7 +5,13 @@ import json
 import sys
 
 from . import __version__
-from .blame import blame_symbol, ledger_hit, record
+from .blame import (
+    blame_signature,
+    blame_symbol,
+    ledger_hit,
+    record,
+    split_signature_target,
+)
 from .derive import derive_requires
 from .errors import GuardError
 from .ledger import Ledger
@@ -54,9 +60,12 @@ def build_parser():
     c.add_argument("--pack", action="append", dest="packs",
                    help="only check this pack (repeatable)")
     c.add_argument("--no-update", action="store_true", help="skip git fetch")
+    c.add_argument("--no-signatures", action="store_true",
+                   help="skip call-site and monkeypatch signature checks")
 
     b = sub.add_parser("blame", help="name the commit and PR that removed a symbol")
     b.add_argument("symbol", help="e.g. comfy.ldm.minimax.model.time_shift_slope")
+    b.add_argument("--param", help="blame a parameter of that symbol instead of the symbol itself")
     b.add_argument("--no-ledger", action="store_true", help="ignore the ledger, always use git")
     b.add_argument("--record", action="store_true", help="write the result back to the ledger")
     b.add_argument("--head", default=DEFAULT_TARGET, help="ref treated as current")
@@ -64,6 +73,8 @@ def build_parser():
     d = sub.add_parser("derive-requires", help="emit a requires-comfyui line for a pack")
     d.add_argument("pack_dir", help="path to one custom-node pack")
     d.add_argument("--no-update", action="store_true", help="skip git fetch")
+    d.add_argument("--no-signatures", action="store_true",
+                   help="derive from symbol presence only, ignoring call signatures")
     return p
 
 
@@ -94,7 +105,8 @@ def _dispatch(args):
         if repo.is_dirty() and not args.quiet:
             print("comfy-import-guard: warning: clone at %s has local modifications; "
                   "results reflect the working tree, not the ref." % repo.path, file=sys.stderr)
-        rep = check(repo, args.comfy_dir, args.target, ledger, args.packs)
+        rep = check(repo, args.comfy_dir, args.target, ledger, args.packs,
+                    signatures=not args.no_signatures)
         if args.json:
             print(json.dumps(rep, indent=2))
         else:
@@ -102,6 +114,16 @@ def _dispatch(args):
         return 1 if rep["totals"]["will_break"] else 0
 
     if args.command == "blame":
+        if args.param:
+            repo.ensure(deep=True)
+            module, qualname = split_signature_target(repo, args.symbol, args.head)
+            rep = blame_signature(repo, module, qualname, args.param, head=args.head)
+            if args.json:
+                print(json.dumps(rep, indent=2))
+            else:
+                _print_param_blame(rep)
+            return 0 if rep.get("changed_in_commit") else 1
+
         use_ledger = not args.no_ledger
         if not (use_ledger and ledger_hit(ledger, args.symbol)):
             repo.ensure(deep=True)   # only clone when the ledger cannot answer
@@ -120,7 +142,7 @@ def _dispatch(args):
         repo.ensure(deep=True)
         if not args.no_update and not args.offline:
             repo.update()
-        rep = derive_requires(repo, args.pack_dir)
+        rep = derive_requires(repo, args.pack_dir, signatures=not args.no_signatures)
         if args.json:
             print(json.dumps(rep, indent=2))
         else:
@@ -149,6 +171,13 @@ def _print_check(rep):
             p["python_files"], p["references"])
         print(meta)
         for row in p["breaking"]:
+            if row.get("status") == "SIGNATURE":
+                print("       BADCALL  %s" % row["dotted"])
+                print("                %s:%s  (%s)" % (row["file"], row["line"], row["kind"]))
+                print("                %s" % row["detail"])
+                print("                upstream accepts %s" % row["upstream_params"])
+                _print_signature_attribution(row.get("attribution"))
+                continue
             print("       MISSING  %s" % row["dotted"])
             print("                %s:%s  (%s)" % (row["file"], row["line"], row["kind"]))
             att = row.get("attribution")
@@ -163,7 +192,16 @@ def _print_check(rep):
                         att.get("last_good_tag") or "?", att.get("first_bad_tag") or "?"))
             elif row["detail"]:
                 print("                %s" % row["detail"])
+        for row in p["signature_drift"]:
+            print("       SIGDRIFT %s  %s:%s" % (row["dotted"], row["file"], row["line"]))
+            print("                %s" % row["detail"])
+            _print_signature_attribution(row.get("attribution"))
         for row in p["soft"]:
+            if row.get("status") == "SIGNATURE_SHIM":
+                print("       SHIM     %s  %s:%s" % (
+                    row["dotted"], row["file"], row["line"]))
+                print("                %s" % row["detail"])
+                continue
             print("       SOFT     %s  %s:%s (guarded by try/except)" % (
                 row["dotted"], row["file"], row["line"]))
         for row in p["unresolvable"]:
@@ -176,10 +214,27 @@ def _print_check(rep):
         print()
 
     t = rep["totals"]
-    print("%d pack(s): %d will break, %d safe, %d warn, %d skipped; %d missing symbol(s)" % (
-        t["packs"], t["will_break"], t["safe"], t["warn"], t["skipped"], t["breaking_symbols"]))
+    line = "%d pack(s): %d will break, %d safe, %d warn, %d skipped; %d breaking reference(s)" % (
+        t["packs"], t["will_break"], t["safe"], t["warn"], t["skipped"], t["breaking_symbols"])
+    if t.get("signature_drift"):
+        line += ", %d signature drift(s)" % t["signature_drift"]
+    print(line)
     if t["will_break"]:
         print("Run `comfy-import-guard blame <module.Symbol>` for the commit that removed it.")
+
+
+def _print_signature_attribution(att):
+    if not att:
+        return
+    print("                parameter '%s' %s by %s%s%s" % (
+        att["param"], att.get("direction") or "changed",
+        (att.get("changed_in_commit") or "?")[:9],
+        " in PR #%s" % att["pr"] if att.get("pr") else "",
+        " on %s" % att["changed_on"][:10] if att.get("changed_on") else "",
+    ))
+    if att.get("last_good_tag") or att.get("first_bad_tag"):
+        print("                last good %s, first bad %s" % (
+            att.get("last_good_tag") or "?", att.get("first_bad_tag") or "?"))
 
 
 def _print_blame(rep):
@@ -215,10 +270,32 @@ def _print_blame(rep):
         print("  note          : %s" % rep["note"])
 
 
+def _print_param_blame(rep):
+    print("%s.%s  parameter '%s'" % (rep["module"], rep["qualname"], rep["param"]))
+    if not rep.get("changed_in_commit"):
+        print("  status        : no change found in %s" % rep["module_path"])
+        print("  note          : the parameter may predate the file, or the symbol "
+              "may not be a plain def")
+        return
+    print("  %-14s: %s" % (rep["direction"], rep["changed_in_commit"][:9]))
+    if rep.get("subject"):
+        print("  commit        : %s" % rep["subject"])
+    if rep.get("pr"):
+        print("  pull request  : Comfy-Org/ComfyUI#%s" % rep["pr"])
+        print("                  https://github.com/comfyanonymous/ComfyUI/pull/%s" % rep["pr"])
+    if rep.get("changed_on"):
+        print("  changed on    : %s" % rep["changed_on"])
+    print("  last good tag : %s" % (rep.get("last_good_tag") or "none"))
+    print("  first bad tag : %s" % (rep.get("first_bad_tag") or "not released yet"))
+
+
 def _print_derive(rep):
     print("derive-requires: %s" % rep["pack"])
-    print("  %d python file(s), %d hard comfy.* reference(s)" % (
-        rep["python_files"], rep["references"]))
+    counts = "  %d python file(s), %d hard comfy.* reference(s)" % (
+        rep["python_files"], rep["references"])
+    if rep.get("call_sites"):
+        counts += ", %d call site(s)" % rep["call_sites"]
+    print(counts)
     if rep["star_imports"]:
         print("  star imports (not resolvable): %s" % ", ".join(rep["star_imports"]))
     if rep["soft_references"]:
@@ -229,8 +306,21 @@ def _print_derive(rep):
         print("  already removed at head:")
         for row in rep["broken_at_head"]:
             print("    %s  (%s:%s)" % (row["dotted"], row["file"], row["line"]))
+    if rep.get("unbindable_at_head"):
+        print("  calls that no longer bind at head:")
+        for row in rep["unbindable_at_head"]:
+            print("    %s  (%s:%s)" % (row["dotted"], row["file"], row["line"]))
+            print("      %s" % row["detail"])
+    for module in rep.get("unparsed_modules") or []:
+        print("  unparsed at some probed tag: %s" % module)
     if not rep["line"]:
         print("  no line emitted: %s" % (rep.get("note") or "unknown"))
+        for row in rep.get("conflict") or []:
+            print("    conflict: %s  (%s:%s)%s" % (
+                row["dotted"], row["file"], row["line"],
+                "  %s" % row["detail"] if row["detail"] else ""))
+        if any(r["status"] == "SIGNATURE" for r in rep.get("conflict") or []):
+            print("  re-run with --no-signatures to derive from imports alone")
         return
     if rep["determined_by"]:
         print("  floor set by  : %s" % ", ".join(rep["determined_by"]))

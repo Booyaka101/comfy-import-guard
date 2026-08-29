@@ -102,6 +102,101 @@ def test_guarded_imports_do_not_raise_the_floor(repo, tmp_path):
     assert parse_tag(rep["floor_tag"]) < (0, 30, 0), rep["floor_tag"]
 
 
+# ------------------------------------------------------- signature-aware range
+
+# comfy.utils.load_torch_file has existed since the beginning, but its
+# return_metadata parameter only landed in v0.3.20 (93fedd92f). Presence alone
+# therefore says >=0.0.1, which would install onto a ComfyUI where the call
+# raises TypeError.
+RETURN_METADATA_TAG = "v0.3.20"
+
+
+def _pack(tmp_path, name, source):
+    pack = tmp_path / name
+    pack.mkdir()
+    (pack / "nodes.py").write_text(source, encoding="utf-8")
+    return str(pack)
+
+
+def test_a_new_keyword_raises_the_floor(repo, tmp_path):
+    path = _pack(tmp_path, "kwarg", "import comfy.utils\n"
+                 "sd, md = comfy.utils.load_torch_file(p, return_metadata=True)\n")
+    rep = derive_requires(repo, path)
+    assert rep["floor_tag"] == RETURN_METADATA_TAG
+    assert rep["line"] == 'requires-comfyui = ">=0.3.20"'
+    assert "comfy.utils.load_torch_file (call)" in rep["determined_by"]
+    assert rep["call_sites"] == 1
+
+
+def test_no_signatures_returns_the_presence_only_floor(repo, tmp_path):
+    """The escape hatch reproduces 1.0.x behaviour, which is too permissive."""
+    source = ("import comfy.utils\n"
+              "sd, md = comfy.utils.load_torch_file(p, return_metadata=True)\n")
+    strict = derive_requires(repo, _pack(tmp_path, "a", source))
+    loose = derive_requires(repo, _pack(tmp_path, "b", source), signatures=False)
+    assert parse_tag(strict["floor_tag"]) > parse_tag(loose["floor_tag"])
+    assert loose["call_sites"] == 0
+
+
+def test_a_removed_keyword_produces_an_upper_bound(repo, tmp_path):
+    """scaled_fp8 left comfy.ops.pick_operations in PR #11000, v0.3.77 -> v0.4.0."""
+    path = _pack(tmp_path, "dead-kwarg", "import comfy.ops\n"
+                 "ops = comfy.ops.pick_operations(dt, cast, scaled_fp8=None)\n")
+    rep = derive_requires(repo, path)
+    assert rep["ceiling_tag"] == "v0.4.0"
+    assert rep["line"].endswith(',<0.4.0"')
+    row = rep["unbindable_at_head"][0]
+    assert row["dotted"] == "comfy.ops.pick_operations"
+    assert "scaled_fp8" in row["detail"]
+    assert rep["broken_at_head"] == []
+
+
+def test_a_version_shim_does_not_collapse_the_range(repo, tmp_path):
+    """One arity per branch must not read as "no release satisfies this pack"."""
+    path = _pack(tmp_path, "shim", "import comfy.utils\n"
+                 "NEW = hasattr(comfy.utils, 'load_torch_file')\n"
+                 "def go(p):\n"
+                 "    if NEW:\n"
+                 "        return comfy.utils.load_torch_file(p, return_metadata=True)\n"
+                 "    return comfy.utils.load_torch_file(p, nope=1)\n")
+    rep = derive_requires(repo, path)
+    assert rep["line"] is not None, rep["note"]
+    assert rep["conflict"] == []
+
+
+def test_a_guarded_call_does_not_raise_the_floor(repo, tmp_path):
+    path = _pack(tmp_path, "guarded-call", "import comfy.utils\n"
+                 "try:\n"
+                 "    comfy.utils.load_torch_file(p, return_metadata=True)\n"
+                 "except TypeError:\n"
+                 "    pass\n")
+    rep = derive_requires(repo, path)
+    assert rep["call_sites"] == 0
+    assert parse_tag(rep["floor_tag"]) < parse_tag(RETURN_METADATA_TAG)
+
+
+def test_a_fallback_call_in_the_handler_still_counts(repo, tmp_path):
+    """Only the try body is guarded; the handler's own call is a real call."""
+    path = _pack(tmp_path, "fallback", "import comfy.utils\n"
+                 "try:\n"
+                 "    comfy.utils.load_torch_file(p, return_metadata=True)\n"
+                 "except TypeError:\n"
+                 "    comfy.utils.load_torch_file(p)\n")
+    rep = derive_requires(repo, path)
+    assert rep["call_sites"] == 1
+    assert parse_tag(rep["floor_tag"]) < parse_tag(RETURN_METADATA_TAG)
+
+
+def test_hard_calls_dedupes_by_shape_not_by_line(repo, tmp_path):
+    from comfy_import_guard.derive import hard_calls
+    scan = scan_pack(_pack(tmp_path, "dupes", "import comfy.utils\n"
+                           "comfy.utils.load_torch_file(a)\n"
+                           "comfy.utils.load_torch_file(b)\n"
+                           "comfy.utils.load_torch_file(c, return_metadata=True)\n"))
+    assert len(scan.call_sites) == 3
+    assert len(hard_calls(scan)) == 2
+
+
 def test_missing_pack_directory_is_a_clean_error(repo, tmp_path):
     from comfy_import_guard.errors import BadInputError
     with pytest.raises((BadInputError, OSError)):

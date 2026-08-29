@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 
 from .errors import BadInputError
+from .signature import ParamSpec, name_of
 
 SKIP_DIRS = {
     "__pycache__",
@@ -38,6 +39,10 @@ SOFT_EXCEPTIONS = {
     "BaseException",
 }
 
+# Catching TypeError around a call is the explicit "I know the signature moved"
+# idiom, so it softens a call site even though it says nothing about an import.
+CALL_SOFT_EXCEPTIONS = SOFT_EXCEPTIONS | {"TypeError"}
+
 # kind values
 FROM = "from"          # from comfy.x import y
 ATTR = "attr"          # comfy.x.y  /  alias.y
@@ -60,11 +65,38 @@ class Reference:
         return self.module if not self.symbol else "%s.%s" % (self.module, self.symbol)
 
 
+@dataclass(frozen=True)
+class CallSite:
+    """A direct call into comfy.*: enough shape to try binding it upstream."""
+
+    dotted: str
+    file: str
+    lineno: int
+    nargs: int              # positional arguments at the call
+    keywords: tuple         # keyword names, in order
+    star_args: bool         # *xs spread at the call
+    star_kwargs: bool       # **kw spread at the call
+    soft: bool = False
+
+
+@dataclass(frozen=True)
+class Monkeypatch:
+    """An assignment that replaces a comfy.* callable with a local function."""
+
+    dotted: str             # the comfy target being replaced
+    file: str
+    lineno: int
+    replacement: ParamSpec  # the replacement's own parameter list
+    soft: bool = False
+
+
 @dataclass
 class PackScan:
     name: str
     path: str
     references: list = field(default_factory=list)
+    call_sites: list = field(default_factory=list)
+    monkeypatches: list = field(default_factory=list)
     unparseable: list = field(default_factory=list)   # (relpath, message)
     vendored_comfy: bool = False
     python_files: int = 0
@@ -120,6 +152,9 @@ def scan_pack(pack_dir, name=None):
             scan.unparseable.append((rel, str(exc)))
             continue
         scan.references.extend(extract_references(tree, rel))
+        calls, patches = extract_calls(tree, rel)
+        scan.call_sites.extend(calls)
+        scan.monkeypatches.extend(patches)
     scan.references = _dedupe(scan.references)
     return scan
 
@@ -134,6 +169,51 @@ def extract_references(tree, filename):
     return refs
 
 
+def extract_calls(tree, filename):
+    """Call sites into comfy.* and monkeypatches over comfy.* in one module.
+
+    Kept apart from ``extract_references``: a call site needs the argument
+    shape and a monkeypatch needs the replacement's parameter list, neither of
+    which fits the Reference model.
+    """
+    soft = _soft_line_ranges(tree, CALL_SOFT_EXCEPTIONS)
+    aliases = _alias_map(tree)
+    if not aliases:
+        return [], []
+    defs = _function_def_map(tree)
+    # `orig = comfy.lora.calculate_weight` binds a local alias to a callable;
+    # a later `orig(...)` is a call site against that dotted path. This map is
+    # deliberately not fed into _attribute_refs, which keeps reference
+    # extraction byte-identical to 1.0.x.
+    value_aliases = _value_alias_map(tree, aliases)
+    shadowed = _shadowed_names(tree, aliases)
+    calls = []
+    patches = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            patches.extend(_patches_from_assign(node, aliases, defs, filename, soft))
+        elif isinstance(node, ast.Call):
+            if _is_getattr(node):
+                continue
+            if _is_setattr(node):
+                patch = _patch_from_setattr(node, aliases, defs, filename, soft)
+                if patch:
+                    patches.append(patch)
+                continue
+            dotted = _call_target(node.func, aliases, value_aliases, shadowed)
+            if not dotted or len(dotted.split(".")) < 2:
+                continue
+            calls.append(CallSite(
+                dotted, filename, node.lineno,
+                nargs=sum(1 for a in node.args if not isinstance(a, ast.Starred)),
+                keywords=tuple(k.arg for k in node.keywords if k.arg is not None),
+                star_args=any(isinstance(a, ast.Starred) for a in node.args),
+                star_kwargs=any(k.arg is None for k in node.keywords),
+                soft=_is_soft(node.lineno, soft),
+            ))
+    return calls, patches
+
+
 # ------------------------------------------------------------------ internals
 
 
@@ -141,13 +221,13 @@ def _is_soft(lineno, soft_ranges):
     return any(lo <= lineno <= hi for lo, hi in soft_ranges)
 
 
-def _soft_line_ranges(tree):
-    """Line spans of try-bodies whose handlers swallow an import failure."""
+def _soft_line_ranges(tree, exceptions=SOFT_EXCEPTIONS):
+    """Line spans of try-bodies whose handlers swallow the relevant failure."""
     ranges = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try):
             continue
-        if not any(_handler_is_soft(h) for h in node.handlers):
+        if not any(_handler_is_soft(h, exceptions) for h in node.handlers):
             continue
         for stmt in node.body:
             lo = stmt.lineno
@@ -156,24 +236,16 @@ def _soft_line_ranges(tree):
     return ranges
 
 
-def _handler_is_soft(handler):
+def _handler_is_soft(handler, exceptions=SOFT_EXCEPTIONS):
     t = handler.type
     if t is None:
         return True
     names = []
     if isinstance(t, ast.Tuple):
-        names = [_name_of(e) for e in t.elts]
+        names = [name_of(e) for e in t.elts]
     else:
-        names = [_name_of(t)]
-    return any(n in SOFT_EXCEPTIONS for n in names if n)
-
-
-def _name_of(node):
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
+        names = [name_of(t)]
+    return any(n in exceptions for n in names if n)
 
 
 def _alias_map(tree):
@@ -262,6 +334,184 @@ def _attribute_refs(tree, filename, aliases, soft):
 
 def _is_getattr(call):
     return isinstance(call.func, ast.Name) and call.func.id == "getattr"
+
+
+def _is_setattr(call):
+    return isinstance(call.func, ast.Name) and call.func.id == "setattr"
+
+
+def _call_target(func, aliases, value_aliases, shadowed):
+    """Dotted comfy path a call's ``func`` resolves to, or None.
+
+    A name the file rebinds to anything else is not this callable any more, so
+    it yields None. Presence checking can afford to be loose about shadowing
+    and grade the result WARN; a call site cannot, because a bad bind is a
+    hard WILL BREAK.
+    """
+    if isinstance(func, ast.Attribute):
+        root = _chain_root(func)
+        return None if root in shadowed else _chain(func, aliases)
+    if isinstance(func, ast.Name):
+        if func.id in shadowed:
+            return None
+        dotted = value_aliases.get(func.id) or aliases.get(func.id)
+        if dotted and _is_comfy(dotted):
+            return dotted
+    return None
+
+
+def _chain_root(node):
+    """Name at the root of an attribute chain, or None."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _shadowed_names(tree, aliases):
+    """Names this file rebinds away from whatever the imports bound them to.
+
+    Deliberately file-wide and conservative: a parameter named
+    ``calculate_weight`` in one function disqualifies the name everywhere in
+    the file. Losing a real finding costs a missed warning; keeping a bad one
+    fails somebody's CI on working code.
+    """
+    out = set()
+
+    def bind(target, ok=False):
+        if isinstance(target, ast.Name):
+            if not ok:
+                out.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for el in target.elts:
+                bind(el)
+        elif isinstance(target, ast.Starred):
+            bind(target.value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            # An assignment from a comfy chain is what value aliases are made
+            # of, so it does not shadow; anything else does.
+            keep = _chain(node.value, aliases) is not None
+            for t in node.targets:
+                bind(t, ok=keep)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            bind(node.target)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            bind(node.target)
+        elif isinstance(node, ast.NamedExpr):
+            bind(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    bind(item.optional_vars)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                out.add(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(node.name)
+            out.update(_arg_names(node.args))
+        elif isinstance(node, ast.Lambda):
+            out.update(_arg_names(node.args))
+        elif isinstance(node, ast.ClassDef):
+            out.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = getattr(node, "module", None)
+            if isinstance(node, ast.ImportFrom) and not node.level and module and _is_comfy(module):
+                continue
+            for a in node.names:
+                if isinstance(node, ast.Import) and _is_comfy(a.name):
+                    continue
+                if a.name != "*":
+                    out.add(a.asname or a.name.split(".")[0])
+    return out
+
+
+def _arg_names(args):
+    names = [a.arg for a in list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)]
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.append(extra.arg)
+    return names
+
+
+def _function_def_map(tree):
+    """Name -> parameter spec for every plain function defined in this file.
+
+    A decorated def, or two same-named defs whose parameter lists differ, maps
+    to None: the actual signature is not statically knowable, and a wrong
+    verdict is worse than silence.
+    """
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        spec = None if node.decorator_list else ParamSpec.from_arguments(node.args)
+        if node.name in out and out[node.name] != spec:
+            out[node.name] = None
+        else:
+            out[node.name] = spec
+    return out
+
+
+def _value_alias_map(tree, aliases):
+    """Local name -> comfy dotted path, from ``name = comfy.x.y`` assignments."""
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or not isinstance(node.value, ast.Attribute):
+            continue
+        dotted = _chain(node.value, aliases)
+        if dotted and len(dotted.split(".")) >= 2:
+            out[target.id] = dotted
+    return out
+
+
+def _patches_from_assign(node, aliases, defs, filename, soft):
+    """``comfy.x.y = fn`` where fn's parameter list is knowable in this file."""
+    spec = _replacement_spec(node.value, defs)
+    if spec is None:
+        return
+    for target in node.targets:
+        if not isinstance(target, ast.Attribute):
+            continue
+        dotted = _chain(target, aliases)
+        if dotted and len(dotted.split(".")) >= 2:
+            yield Monkeypatch(dotted, filename, node.lineno, spec,
+                              _is_soft(node.lineno, soft))
+
+
+def _patch_from_setattr(call, aliases, defs, filename, soft):
+    """``setattr(comfy.x, "y", fn)`` with a literal name."""
+    if len(call.args) != 3:
+        return None
+    base = _chain(call.args[0], aliases) if isinstance(call.args[0], ast.Attribute) else (
+        aliases.get(call.args[0].id) if isinstance(call.args[0], ast.Name) else None)
+    name = call.args[1]
+    if not base or not _is_comfy(base):
+        return None
+    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+        return None
+    spec = _replacement_spec(call.args[2], defs)
+    if spec is None:
+        return None
+    return Monkeypatch("%s.%s" % (base, name.value), filename, call.lineno, spec,
+                       _is_soft(call.lineno, soft))
+
+
+def _replacement_spec(value, defs):
+    """Parameter spec of the replacement expression, or None when unknowable.
+
+    A lambda carries its own arguments; a bare name must be a plain FunctionDef
+    in the same file. functools.partial, decorated defs and anything imported
+    stay None - the brief for all of them is silence, not a guess.
+    """
+    if isinstance(value, ast.Lambda):
+        return ParamSpec.from_arguments(value.args)
+    if isinstance(value, ast.Name):
+        return defs.get(value.id)
+    return None
 
 
 def _chain(node, aliases):
