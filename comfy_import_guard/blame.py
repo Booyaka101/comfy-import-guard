@@ -4,6 +4,7 @@ import re
 
 from .errors import BadInputError
 from .resolve import Resolver, exported_names
+from .signature import spec_from_source
 from .version import sort_tags
 
 PR_RE = re.compile(r"\(#(\d+)\)\s*$")
@@ -146,25 +147,98 @@ def blame_symbol(repo, dotted, ledger=None, use_ledger=True, head="origin/master
     if m:
         report["pr"] = int(m.group(1))
 
-    tags = sort_tags(repo.all_tags())
-    containing = set(repo.tags_containing(removal["sha"]))
-    bad = [t for t in tags if t in containing]
-    report["first_bad_tag"] = bad[0] if bad else None
-
-    if bad:
-        idx = tags.index(bad[0])
-        for t in reversed(tags[:idx]):
-            if _defined_at(repo, t, path, symbol):
-                report["last_good_tag"] = t
-                break
-    else:
-        for t in reversed(tags):
-            if _defined_at(repo, t, path, symbol):
-                report["last_good_tag"] = t
-                break
+    last_good, first_bad = _tag_boundary(
+        repo, removal["sha"], lambda t: _defined_at(repo, t, path, symbol))
+    report["last_good_tag"] = last_good
+    report["first_bad_tag"] = first_bad
+    if first_bad is None:
         report["note"] = "removal is not in any release tag yet"
 
     return report
+
+
+def _tag_boundary(repo, sha, good_at):
+    """(last_good_tag, first_bad_tag) for the release boundary around ``sha``.
+
+    ``good_at(tag)`` says whether a tag is on the good side of the change.
+    When ``sha`` is not in any tag yet there is no first bad, but the last
+    good tag is still found by walking every release.
+    """
+    tags = sort_tags(repo.all_tags())
+    containing = set(repo.tags_containing(sha))
+    bad = [t for t in tags if t in containing]
+    first_bad = bad[0] if bad else None
+    search = tags[:tags.index(bad[0])] if bad else tags
+    for t in reversed(search):
+        if good_at(t):
+            return t, first_bad
+    return None, first_bad
+
+
+def blame_signature(repo, module, qualname, param, head="origin/master"):
+    """Commit where the signature of ``module.qualname`` gained or lost ``param``.
+
+    Same machinery as ``blame_symbol``: a word-anchored pickaxe over the
+    module's history, presence probed at each candidate and its parent. Here
+    presence means "is a parameter of that def", not "is bound at module
+    scope", so the commit found is the one that moved the signature.
+    """
+    path = module_path_at(repo, module, head)
+    commits = repo.pickaxe(param, path)
+
+    event = None
+    direction = None
+    for c in commits:  # newest first
+        try:
+            now = _param_at(repo, c["sha"], path, qualname, param)
+            before = _param_at(repo, c["sha"] + "^", path, qualname, param)
+        except Exception:
+            continue
+        if now != before:
+            event = c
+            direction = "added" if now else "removed"
+            break
+
+    report = {
+        "module": module,
+        "qualname": qualname,
+        "param": param,
+        "module_path": path,
+        "head": head,
+        "candidates": len(commits),
+        "changed_in_commit": None,
+        "direction": None,
+        "pr": None,
+        "subject": None,
+        "changed_on": None,
+        "last_good_tag": None,
+        "first_bad_tag": None,
+    }
+    if event is None:
+        return report
+
+    report["changed_in_commit"] = event["sha"]
+    report["direction"] = direction
+    report["subject"] = event["subject"]
+    report["changed_on"] = event["date"]
+    m = PR_RE.search(event["subject"])
+    if m:
+        report["pr"] = int(m.group(1))
+
+    last_good, first_bad = _tag_boundary(
+        repo, event["sha"],
+        lambda t: _param_at(repo, t, path, qualname, param) != (direction == "added"))
+    report["last_good_tag"] = last_good
+    report["first_bad_tag"] = first_bad
+    return report
+
+
+def _param_at(repo, ref, path, qualname, param):
+    src = repo.read_file(ref, path)
+    if src is None:
+        return False
+    spec = spec_from_source(src, qualname)
+    return spec is not None and param in spec.names
 
 
 def record(ledger, report, packs=()):

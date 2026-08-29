@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "comfy-import-guard"
-version = "1.0.0"
-description = "Predict and attribute ComfyUI custom-node import breakage caused by removals in comfy.* internals."
+version = "1.1.0"
+description = "Predict and attribute ComfyUI custom-node breakage: removed comfy.* symbols, unbindable calls, and monkeypatches behind the upstream signature."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

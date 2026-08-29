@@ -54,6 +54,8 @@ def build_parser():
     c.add_argument("--pack", action="append", dest="packs",
                    help="only check this pack (repeatable)")
     c.add_argument("--no-update", action="store_true", help="skip git fetch")
+    c.add_argument("--no-signatures", action="store_true",
+                   help="skip call-site and monkeypatch signature checks")
 
     b = sub.add_parser("blame", help="name the commit and PR that removed a symbol")
     b.add_argument("symbol", help="e.g. comfy.ldm.minimax.model.time_shift_slope")
@@ -94,7 +96,8 @@ def _dispatch(args):
         if repo.is_dirty() and not args.quiet:
             print("comfy-import-guard: warning: clone at %s has local modifications; "
                   "results reflect the working tree, not the ref." % repo.path, file=sys.stderr)
-        rep = check(repo, args.comfy_dir, args.target, ledger, args.packs)
+        rep = check(repo, args.comfy_dir, args.target, ledger, args.packs,
+                    signatures=not args.no_signatures)
         if args.json:
             print(json.dumps(rep, indent=2))
         else:
@@ -149,6 +152,13 @@ def _print_check(rep):
             p["python_files"], p["references"])
         print(meta)
         for row in p["breaking"]:
+            if row.get("status") == "SIGNATURE":
+                print("       BADCALL  %s" % row["dotted"])
+                print("                %s:%s  (%s)" % (row["file"], row["line"], row["kind"]))
+                print("                %s" % row["detail"])
+                print("                upstream accepts %s" % row["upstream_params"])
+                _print_signature_attribution(row.get("attribution"))
+                continue
             print("       MISSING  %s" % row["dotted"])
             print("                %s:%s  (%s)" % (row["file"], row["line"], row["kind"]))
             att = row.get("attribution")
@@ -163,6 +173,10 @@ def _print_check(rep):
                         att.get("last_good_tag") or "?", att.get("first_bad_tag") or "?"))
             elif row["detail"]:
                 print("                %s" % row["detail"])
+        for row in p["signature_drift"]:
+            print("       SIGDRIFT %s  %s:%s" % (row["dotted"], row["file"], row["line"]))
+            print("                %s" % row["detail"])
+            _print_signature_attribution(row.get("attribution"))
         for row in p["soft"]:
             print("       SOFT     %s  %s:%s (guarded by try/except)" % (
                 row["dotted"], row["file"], row["line"]))
@@ -176,10 +190,27 @@ def _print_check(rep):
         print()
 
     t = rep["totals"]
-    print("%d pack(s): %d will break, %d safe, %d warn, %d skipped; %d missing symbol(s)" % (
-        t["packs"], t["will_break"], t["safe"], t["warn"], t["skipped"], t["breaking_symbols"]))
+    line = "%d pack(s): %d will break, %d safe, %d warn, %d skipped; %d breaking reference(s)" % (
+        t["packs"], t["will_break"], t["safe"], t["warn"], t["skipped"], t["breaking_symbols"])
+    if t.get("signature_drift"):
+        line += ", %d signature drift(s)" % t["signature_drift"]
+    print(line)
     if t["will_break"]:
         print("Run `comfy-import-guard blame <module.Symbol>` for the commit that removed it.")
+
+
+def _print_signature_attribution(att):
+    if not att:
+        return
+    print("                parameter '%s' %s by %s%s%s" % (
+        att["param"], att.get("direction") or "changed",
+        (att.get("changed_in_commit") or "?")[:9],
+        " in PR #%s" % att["pr"] if att.get("pr") else "",
+        " on %s" % att["changed_on"][:10] if att.get("changed_on") else "",
+    ))
+    if att.get("last_good_tag") or att.get("first_bad_tag"):
+        print("                last good %s, first bad %s" % (
+            att.get("last_good_tag") or "?", att.get("first_bad_tag") or "?"))
 
 
 def _print_blame(rep):

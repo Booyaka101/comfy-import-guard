@@ -5,9 +5,11 @@ Returns plain dicts so the CLI and the read-only HTTP route render the same data
 
 import os
 
+from .blame import blame_signature
 from .errors import BadInputError
 from .extract import STAR, scan_pack
 from .resolve import MODULE_MISSING, Resolver
+from .signature import FOUND, PARSE_FAILED, SignatureResolver, bind_call, replacement_drops
 
 SAFE = "SAFE"
 WILL_BREAK = "WILL BREAK"
@@ -51,10 +53,12 @@ def list_packs(custom_nodes):
     return out
 
 
-def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None):
+def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None, signatures=True):
     custom_nodes = find_custom_nodes(comfy_dir)
     entries = [(n, p) for n, p in list_packs(custom_nodes) if not packs or n in set(packs)]
     resolver = Resolver(repo, target)
+    sig = SignatureResolver(resolver) if signatures else None
+    blame_cache = {}
 
     report = {
         "comfy_dir": os.path.abspath(str(comfy_dir)),
@@ -63,11 +67,12 @@ def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None):
         "target_sha": repo.resolve_ref(target),
         "packs": [],
         "totals": {"packs": len(entries), "will_break": 0, "safe": 0,
-                   "warn": 0, "skipped": 0, "breaking_symbols": 0},
+                   "warn": 0, "skipped": 0, "breaking_symbols": 0,
+                   "signature_drift": 0},
     }
 
     for name, path in entries:
-        report["packs"].append(_check_pack(resolver, name, path, ledger))
+        report["packs"].append(_check_pack(resolver, name, path, ledger, sig, blame_cache))
 
     for p in report["packs"]:
         key = {SAFE: "safe", WILL_BREAK: "will_break", WARN: "warn", SKIPPED: "skipped"}[
@@ -75,10 +80,11 @@ def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None):
         ]
         report["totals"][key] += 1
         report["totals"]["breaking_symbols"] += len(p["breaking"])
+        report["totals"]["signature_drift"] += len(p["signature_drift"])
     return report
 
 
-def _check_pack(resolver, name, path, ledger):
+def _check_pack(resolver, name, path, ledger, sig=None, blame_cache=None):
     scan = scan_pack(path, name)
     out = {
         "pack": name,
@@ -90,6 +96,7 @@ def _check_pack(resolver, name, path, ledger):
         "breaking": [],
         "soft": [],
         "unresolvable": [],
+        "signature_drift": [],
         "verdict": SAFE,
         "note": "",
     }
@@ -133,16 +140,126 @@ def _check_pack(resolver, name, path, ledger):
                     }
             out["breaking"].append(row)
 
+    if sig is not None:
+        _check_signatures(sig, scan, out, blame_cache if blame_cache is not None else {})
+
     if out["breaking"]:
         out["verdict"] = WILL_BREAK
-    elif out["unresolvable"] or out["soft"] or out["unparseable"]:
+    elif out["unresolvable"] or out["soft"] or out["unparseable"] or out["signature_drift"]:
         out["verdict"] = WARN
         bits = []
         if out["unresolvable"]:
             bits.append("%d unresolvable reference(s)" % len(out["unresolvable"]))
         if out["soft"]:
             bits.append("%d guarded import(s) that would fail" % len(out["soft"]))
+        if out["signature_drift"]:
+            bits.append("%d monkeypatch(es) behind the upstream signature" % len(out["signature_drift"]))
         if out["unparseable"]:
             bits.append("%d file(s) this interpreter could not parse" % len(out["unparseable"]))
         out["note"] = "; ".join(bits)
     return out
+
+
+def _check_signatures(sig, scan, out, blame_cache):
+    """Bind every comfy.* call site and monkeypatch against the target ref."""
+    parse_failed = set()
+
+    def target_unparsed(lk, file, line):
+        if lk.module in parse_failed:
+            return
+        parse_failed.add(lk.module)
+        out["unresolvable"].append({
+            "module": lk.module, "symbol": lk.qualname,
+            "dotted": "%s.%s" % (lk.module, lk.qualname),
+            "file": file, "line": line, "kind": "call",
+            "status": "TARGET_UNPARSED", "detail": lk.detail,
+        })
+
+    for call in scan.call_sites:
+        lk = sig.lookup(call.dotted)
+        if lk.status == PARSE_FAILED:
+            target_unparsed(lk, call.file, call.lineno)
+            continue
+        if lk.status != FOUND:
+            continue
+        problems = bind_call(lk.spec, call.nargs, call.keywords,
+                             call.star_args, call.star_kwargs)
+        if not problems:
+            continue
+        row = {
+            "module": lk.module,
+            "symbol": lk.qualname,
+            "dotted": "%s.%s" % (lk.module, lk.qualname),
+            "file": call.file,
+            "line": call.lineno,
+            "kind": "call",
+            "status": "SIGNATURE",
+            "detail": "; ".join(m for _, m in problems),
+            "upstream_params": lk.spec.render(),
+        }
+        if call.soft:
+            row["soft"] = True
+            out["soft"].append(row)
+            continue
+        param = next((p for p, _ in problems if p), None)
+        att = _signature_attribution(sig, lk, param, blame_cache)
+        if att:
+            row["attribution"] = att
+        out["breaking"].append(row)
+
+    for patch in scan.monkeypatches:
+        lk = sig.lookup(patch.dotted)
+        if lk.status == PARSE_FAILED:
+            target_unparsed(lk, patch.file, patch.lineno)
+            continue
+        if lk.status != FOUND:
+            continue
+        dropped = replacement_drops(lk.spec, patch.replacement)
+        if not dropped:
+            continue
+        row = {
+            "module": lk.module,
+            "symbol": lk.qualname,
+            "dotted": "%s.%s" % (lk.module, lk.qualname),
+            "file": patch.file,
+            "line": patch.lineno,
+            "kind": "monkeypatch",
+            "status": "SIGNATURE_DRIFT",
+            "missing": dropped,
+            "detail": "replacement drops %s present upstream" % (
+                ", ".join("'%s'" % d for d in dropped)),
+            "upstream_params": lk.spec.render(),
+            "soft": patch.soft,
+        }
+        att = _signature_attribution(sig, lk, dropped[0], blame_cache)
+        if att:
+            row["attribution"] = att
+        out["signature_drift"].append(row)
+
+
+def _signature_attribution(sig, lk, param, blame_cache):
+    """Name the commit that moved the signature, when git can still say."""
+    if not param:
+        return None
+    key = (lk.module, lk.qualname, param)
+    if key in blame_cache:
+        return blame_cache[key]
+    att = None
+    try:
+        rep = blame_signature(sig.resolver.repo, lk.module, lk.qualname, param,
+                              head=sig.ref)
+        if rep.get("changed_in_commit"):
+            att = {
+                "param": param,
+                "direction": rep["direction"],
+                "changed_in_commit": rep["changed_in_commit"],
+                "pr": rep.get("pr"),
+                "changed_on": rep.get("changed_on"),
+                "last_good_tag": rep.get("last_good_tag"),
+                "first_bad_tag": rep.get("first_bad_tag"),
+                "source": "git",
+            }
+    except Exception:
+        att = None   # offline shallow clone, or history the pickaxe cannot see
+    blame_cache[key] = att
+    return att

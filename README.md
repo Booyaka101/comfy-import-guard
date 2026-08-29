@@ -3,7 +3,9 @@
 [![tests](https://github.com/Booyaka101/comfy-import-guard/actions/workflows/test.yml/badge.svg)](https://github.com/Booyaka101/comfy-import-guard/actions/workflows/test.yml)
 
 Predicts which of your ComfyUI custom-node packs will die on the next `git pull`,
-and names the commit and PR that killed them.
+and names the commit and PR that killed them. Catches both failure shapes:
+the ImportError from a removed `comfy.*` symbol, and the TypeError from a call
+or monkeypatch whose parameter list no longer matches upstream.
 
 Zero third-party dependencies. It has to load inside a ComfyUI whose other packs
 are already broken, so it uses nothing but the standard library and `git`.
@@ -24,6 +26,24 @@ The same shape hit `comfy.ldm.minimax.model.time_shift_slope` on 2026-08-06
 ([T8mars/comfyui-minimax-h3-blockcache-T8#1](https://github.com/T8mars/comfyui-minimax-h3-blockcache-T8/issues/1)).
 
 You find out when the console scrolls past at startup. This tells you before.
+
+The other shape does not even need a removal. Core adds a parameter, a pack
+keeps calling with the old shape or keeps shipping its own replacement of the
+function, and the workflow dies mid-run:
+
+```
+TypeError: calculate_weight() got an unexpected keyword argument 'intermediate_dtype'
+```
+
+That is [Comfy-Org/ComfyUI#5355](https://github.com/Comfy-Org/ComfyUI/issues/5355),
+a pack shipping an outdated `calculate_weight` while core grew
+`intermediate_dtype`. The same class hit `WanAttentionBlock.forward` /
+`context_img_len` in
+[#12134](https://github.com/Comfy-Org/ComfyUI/issues/12134) and
+`patched_forward_orig` / `timestep_zero_index` in
+[#13136](https://github.com/Comfy-Org/ComfyUI/issues/13136). Since 1.1.0 this
+tool binds every direct `comfy.*` call site and monkeypatch against the real
+parameter list at the target ref and reports the ones that cannot bind.
 
 **Why grep does not work here.** PR #11632 deleted the module-level
 `def precompute_freqs_cis(...)` and added a private `_precompute_freqs_cis`
@@ -71,7 +91,7 @@ comfy-import-guard check
 [ok] comfyui_controlnet_aux  SAFE
      667 python file(s), 86 comfy.* reference(s)
 
-1 pack(s): 0 will break, 1 safe, 0 warn, 0 skipped; 0 missing symbol(s)
+1 pack(s): 0 will break, 1 safe, 0 warn, 0 skipped; 0 breaking reference(s)
 ```
 
 Against a set of packs with real breakage:
@@ -105,7 +125,7 @@ comfy-import-guard check
        SOFT     comfy.ldm.minimax.model.time_shift_slope  nodes.py:15 (guarded by try/except)
      note: 1 guarded import(s) that would fail
 
-3 pack(s): 2 will break, 0 safe, 1 warn, 0 skipped; 3 missing symbol(s)
+3 pack(s): 2 will break, 0 safe, 1 warn, 0 skipped; 3 breaking reference(s)
 Run `comfy-import-guard blame <module.Symbol>` for the commit that removed it.
 ```
 
@@ -113,6 +133,43 @@ Exit code is 1 when anything will break, so it drops straight into CI.
 
 `--target` takes any ref: a tag (`v0.31.0`), a sha, or `origin/master` (default).
 Check what a specific update will do to you before you take it.
+
+### Signature checks
+
+Real output against ComfyUI-Easy-Use at master today (import rows elided):
+
+```
+[!!] ComfyUI-Easy-Use  WILL BREAK
+     99 python file(s), 449 comfy.* reference(s)
+       ...
+       BADCALL  comfy.ops.pick_operations
+                py/modules/brushnet/__init__.py:676  (call)
+                unexpected keyword argument 'scaled_fp8'
+                upstream accepts (weight_dtype, compute_dtype, load_device=..., disable_fast_fp8=..., fp8_optimizations=..., model_config=...)
+                parameter 'scaled_fp8' removed by 43071e3de in PR #11000 on 2025-12-05
+                last good v0.3.77, first bad v0.4.0
+       SIGDRIFT comfy.clip_vision.load_clipvision_from_sd  py/modules/kolors/loader.py:282
+                replacement drops 'sd', 'prefix', 'convert_keys' present upstream
+```
+
+`BADCALL` is a call that cannot bind at the target ref: an unknown keyword
+with no `**kwargs`, too many positionals with no `*args`, or a now-required
+parameter missing. It raises TypeError the moment it runs, so it counts toward
+WILL BREAK. `SIGDRIFT` is a monkeypatch replacement that no longer accepts a
+parameter the upstream original has. Whether core passes that argument on your
+path is not statically decidable, so it grades WARN, not a break. Both name
+the commit that moved the signature, same as removals do.
+
+Measured before shipping on 20 real popular packs (Impact-Pack, KJNodes,
+Manager, WAS suite, IPAdapter_plus, VideoHelperSuite and friends: 1,273 Python
+files, 1,174 direct `comfy.*` call sites, 10 monkeypatches): 2 findings, both
+of them true on hand-verification against the pack and ComfyUI source, 18 of
+20 packs silent. The `pick_operations` row above is one of the two, a live
+TypeError in Easy-Use's BrushNet path. Calls spreading `*args`/`**kwargs`,
+decorated targets or replacements, `functools.partial`, and anything the alias
+machinery cannot resolve stay silent by design; the corpus's other nine
+monkeypatches either match upstream exactly or take `**kwargs`, and none of
+them fired. `--no-signatures` turns the whole pass off.
 
 ### `blame`: who removed this symbol?
 
@@ -206,6 +263,7 @@ returns `{"ok": false, "hint": "..."}` telling you which command to run once.
 | `--pack NAME` | check only these packs (repeatable) |
 | `--cache-dir` | where the ComfyUI clone lives |
 | `--ledger` | alternate `ledger.json` |
+| `--no-signatures` | skip call-site and monkeypatch signature checks |
 | `--offline` | never touch the network; answer from the existing clone and the ledger |
 | `--no-update` | skip the `git fetch` before checking |
 | `--json` | machine-readable output for every command |
@@ -217,21 +275,29 @@ Global flags work before or after the subcommand.
 
 | verdict | meaning |
 | --- | --- |
-| `SAFE` | every reference resolves at the target ref |
-| `WILL BREAK` | at least one unguarded reference is gone; exit code 1 |
-| `WARN` | only guarded (`try/except ImportError`) references fail, or something could not be resolved statically |
+| `SAFE` | every reference resolves and every checkable call binds at the target ref |
+| `WILL BREAK` | an unguarded reference is gone (`MISSING`), or a call cannot bind (`BADCALL`); exit code 1 |
+| `WARN` | only guarded (`try/except`) references fail, a monkeypatch is behind the upstream signature (`SIGDRIFT`), or something could not be resolved statically |
 | `SKIPPED` | the pack vendors its own `comfy/` package, so it resolves pack-locally |
 
 ## How it works
 
 1. `ast.walk` every `.py` in each pack. Collect `from comfy.… import x`, plain
    `import comfy.x.y as z` plus attribute chains rooted at those aliases, and
-   `getattr(comfy.x, "literal")`.
+   `getattr(comfy.x, "literal")`. Also collect every direct call into those
+   chains (positional count, keyword names, `*`/`**` spreads) and every
+   monkeypatch assignment whose replacement is a function or lambda defined in
+   the same file.
 2. `git show <ref>:comfy/…/model.py` for each referenced module, parse it, and
    build the set of names bound at module scope.
 3. Anything referenced but not bound is a break. `git log -S'\bsymbol\b'
    --pickaxe-regex` finds the commit that changed it; `git tag --contains` turns
    that into a release boundary.
+4. For call sites and monkeypatches, resolve the real parameter list at the
+   ref (through one class level, so `WanAttentionBlock.forward` works, and
+   against `__init__` when the target is a class), try to bind the call
+   against it, and diff the replacement's parameters against it. The same
+   pickaxe walk then names the commit where the signature changed.
 
 Only the public ComfyUI git repository is used. No API, no token, no account.
 
@@ -245,9 +311,12 @@ Only the public ComfyUI git repository is used. No API, no token, no account.
 - **Local shadowing is not modelled.** A local variable that happens to reuse an
   alias name can produce a spurious reference. It shows up as `WARN`/`MISSING`
   with a file and line, so it is cheap to dismiss.
-- **Import success is not load success.** A pack whose imports all resolve can
-  still fail on a changed function signature or a changed return type. This tool
-  answers the import question only.
+- **Signature checks cover parameter lists, not behaviour.** A changed return
+  type, a changed default value, or changed semantics behind an unchanged
+  parameter list are all still invisible. Calls that spread `*args`/`**kwargs`,
+  decorated targets or replacements, `functools.partial`, re-exported names and
+  calls on instances (rather than through the module or class) are deliberately
+  silent: a wrong TypeError prediction is worse than a missed one.
 - **Files this interpreter cannot parse are counted and printed**, never
   silently skipped. If you see `UNPARSED`, the pack uses syntax newer than your
   Python and that file was not analysed.
@@ -261,10 +330,12 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-59 tests. They assert against live public ComfyUI history rather than recorded
+107 tests. They assert against live public ComfyUI history rather than recorded
 fixtures: the real commits `f2b002372` and `bdcb886a4`, the real tags
-`v0.7.0`/`v0.8.0` and `v0.30.2`/`v0.31.0`. They need `git` and a one-time clone,
-and skip cleanly if neither is available.
+`v0.7.0`/`v0.8.0` and `v0.30.2`/`v0.31.0`, and for the signature checks the
+real parameter additions behind issues #5355 and #12134 (`c26ca2720` and
+`0d720e436`). They need `git` and a one-time clone, and skip cleanly if
+neither is available.
 
 ## Publishing
 
