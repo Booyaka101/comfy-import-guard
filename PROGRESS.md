@@ -104,10 +104,43 @@ Two of them would have failed real users' CI on working code.
 Also: CHANGELOG.md was missing from the sdist include list, and the
 `blame --param` output column was misaligned by one. Both fixed.
 
+## derive-requires closed the signature gap too
+
+`derive-requires` used to answer presence only, so a pack passing a keyword
+that upstream added later got a floor as old as the *symbol*, not as old as
+the *call*. That range installs the pack onto a ComfyUI where its own call
+raises TypeError.
+
+A release now satisfies a pack when every hard reference resolves and every
+hard call binds. The binding-and-shim logic is shared with `check` via
+`signature.check_call_sites`, so both commands judge a call identically. That
+sharing is load-bearing rather than tidiness: a wrongly hard call in `check`
+is one bad row, but in `derive` it makes every release look unsatisfiable and
+the pack gets no range at all.
+
+Measured, with the parameter boundaries verified independently by
+`blame --param`:
+
+| pack | presence only | with signatures |
+| --- | --- | --- |
+| calls `load_torch_file(p, return_metadata=True)` | `>=0.0.1` (wrong) | `>=0.3.20` |
+| calls `pick_operations(..., scaled_fp8=...)` | no bound from a call | `>=0.2.4,<0.4.0` |
+| the T8 shim pack | `>=0.30.0` | `>=0.30.0` (does not collapse) |
+| all 20 corpus packs | - | identical, 20/20 |
+
+The corpus being unchanged is the result to keep: the constraint closes a hole
+without inflating anybody's floor. Cost is about 60% more wall clock on the
+largest pack measured (21s to 34s on Easy-Use, 99 files and 136 call sites),
+and nothing noticeable on small packs. `--no-signatures` now works on
+`derive-requires` as well as `check`.
+
+Also new: when no release can satisfy a pack, the result lists the conflicting
+requirements under `conflict` instead of only saying that none does.
+
 ## What is VERIFIED working
 
-- 117 tests green on Python 3.11 and 3.12: `python -m pytest tests -q` (59
-  existing + 58 new; the two issue-reconstruction fixtures assert rule, file,
+- 124 tests green on Python 3.11 and 3.12: `python -m pytest tests -q` (59
+  existing + 65 new; the two issue-reconstruction fixtures assert rule, file,
   line, blamed commit and tag boundary against live history).
 - Corpus re-run after each review fix, compared row by row against the
   previous JSON: both true findings survive, all 20 verdicts unchanged, zero
@@ -167,8 +200,9 @@ Also: CHANGELOG.md was missing from the sdist include list, and the
   the owner ships from the phone (PR to main per house rules, then tag; the
   registry workflow publishes on its own, PyPI needs `twine upload dist/*`).
 - Ledger schema untouched: signature attributions are derived live from git,
-  not cached in ledger.json. A future `blame --param` CLI could reuse
-  `blame_signature` directly.
+  not cached in ledger.json. Caching parameter moves in the ledger would make
+  `derive-requires` and repeat `check` runs faster offline.
+- Return types and attribute shapes remain out of scope, as the README says.
 - ComfyUI-Easy-Use was not reported upstream. The BADCALL finding
   (`pick_operations`/`scaled_fp8`) is a real bug in their BrushNet path worth
   an issue in the owner's voice, after 1.1.0 ships.

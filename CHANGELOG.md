@@ -39,8 +39,18 @@ release checks for that class statically.
   import of the same name) are dropped from call checking. Presence checks can
   afford to be loose about shadowing and grade the result WARN; a call site
   cannot, because a bad bind is a hard failure.
-- New `--no-signatures` flag on `check` turns the whole pass off, and
-  `blame <symbol> --param <name>` attributes a parameter rather than a symbol.
+- `derive-requires` now derives its range from signatures too. A release
+  satisfies a pack only when every symbol resolves *and* every call binds, so
+  passing a keyword that upstream added in v0.3.20 sets the floor there
+  instead of at the symbol's much older birthday, and passing one upstream has
+  since dropped produces a ceiling with no removed symbol involved. Across the
+  20-pack corpus this changed no derived range, which is the point: it closes
+  a hole without inflating anybody's floor.
+- When no release can satisfy a pack, `derive-requires` now lists the
+  conflicting requirements instead of only saying that none does.
+- New `--no-signatures` flag on `check` and `derive-requires` turns the pass
+  off, and `blame <symbol> --param <name>` attributes a parameter rather than
+  a symbol.
 - Measured before shipping on 20 real popular packs (1,273 Python files,
   1,116 checkable `comfy.*` call sites, 10 monkeypatches): 2 findings, both
   true on hand-verification against pack and ComfyUI source, 18 of 20 packs

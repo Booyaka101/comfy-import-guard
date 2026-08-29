@@ -73,6 +73,8 @@ def build_parser():
     d = sub.add_parser("derive-requires", help="emit a requires-comfyui line for a pack")
     d.add_argument("pack_dir", help="path to one custom-node pack")
     d.add_argument("--no-update", action="store_true", help="skip git fetch")
+    d.add_argument("--no-signatures", action="store_true",
+                   help="derive from symbol presence only, ignoring call signatures")
     return p
 
 
@@ -140,7 +142,7 @@ def _dispatch(args):
         repo.ensure(deep=True)
         if not args.no_update and not args.offline:
             repo.update()
-        rep = derive_requires(repo, args.pack_dir)
+        rep = derive_requires(repo, args.pack_dir, signatures=not args.no_signatures)
         if args.json:
             print(json.dumps(rep, indent=2))
         else:
@@ -289,8 +291,11 @@ def _print_param_blame(rep):
 
 def _print_derive(rep):
     print("derive-requires: %s" % rep["pack"])
-    print("  %d python file(s), %d hard comfy.* reference(s)" % (
-        rep["python_files"], rep["references"]))
+    counts = "  %d python file(s), %d hard comfy.* reference(s)" % (
+        rep["python_files"], rep["references"])
+    if rep.get("call_sites"):
+        counts += ", %d call site(s)" % rep["call_sites"]
+    print(counts)
     if rep["star_imports"]:
         print("  star imports (not resolvable): %s" % ", ".join(rep["star_imports"]))
     if rep["soft_references"]:
@@ -301,8 +306,21 @@ def _print_derive(rep):
         print("  already removed at head:")
         for row in rep["broken_at_head"]:
             print("    %s  (%s:%s)" % (row["dotted"], row["file"], row["line"]))
+    if rep.get("unbindable_at_head"):
+        print("  calls that no longer bind at head:")
+        for row in rep["unbindable_at_head"]:
+            print("    %s  (%s:%s)" % (row["dotted"], row["file"], row["line"]))
+            print("      %s" % row["detail"])
+    for module in rep.get("unparsed_modules") or []:
+        print("  unparsed at some probed tag: %s" % module)
     if not rep["line"]:
         print("  no line emitted: %s" % (rep.get("note") or "unknown"))
+        for row in rep.get("conflict") or []:
+            print("    conflict: %s  (%s:%s)%s" % (
+                row["dotted"], row["file"], row["line"],
+                "  %s" % row["detail"] if row["detail"] else ""))
+        if any(r["status"] == "SIGNATURE" for r in rep.get("conflict") or []):
+            print("  re-run with --no-signatures to derive from imports alone")
         return
     if rep["determined_by"]:
         print("  floor set by  : %s" % ", ".join(rep["determined_by"]))

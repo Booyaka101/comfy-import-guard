@@ -218,6 +218,64 @@ def name_of(node):
 # ------------------------------------------------------------------- binding
 
 
+@dataclass
+class CallCheck:
+    """One call site weighed against the target ref."""
+
+    call: object
+    lookup: SignatureLookup
+    problems: tuple = None   # None when not statically checkable, () when it binds
+    shim: bool = False
+
+    @property
+    def binds(self):
+        return self.problems == ()
+
+    @property
+    def hard(self):
+        """Fails here and is not explained away by a sibling branch."""
+        return bool(self.problems) and not self.shim
+
+    @property
+    def first_param(self):
+        return next((p for p, _ in self.problems or () if p), None)
+
+    @property
+    def detail(self):
+        return "; ".join(m for _, m in self.problems or ())
+
+
+def check_call_sites(sig, call_sites):
+    """Bind every call site at one ref, marking the version shims.
+
+    Shared by ``check`` and ``derive-requires`` so both judge a call the same
+    way. A pack supporting several ComfyUI versions calls one arity per branch
+    behind a ``hasattr`` probe, so at any given ref one branch binds and the
+    others are dead code; a failing call whose sibling in the same file binds
+    is a shim, not a break. Calls whose target cannot be resolved are dropped;
+    a target module that will not parse is returned so the caller can count it.
+    """
+    checks = []
+    for call in call_sites:
+        lookup = sig.lookup(call.dotted)
+        if lookup.status == PARSE_FAILED:
+            checks.append(CallCheck(call, lookup))
+            continue
+        if lookup.status != FOUND:
+            continue
+        problems = bind_call(lookup.spec, call.nargs, call.keywords,
+                             call.star_args, call.star_kwargs)
+        if problems is None:
+            continue
+        checks.append(CallCheck(call, lookup, tuple(problems)))
+
+    binding = {(c.call.file, c.call.dotted) for c in checks if c.binds}
+    for c in checks:
+        if c.problems and (c.call.file, c.call.dotted) in binding:
+            c.shim = True
+    return checks
+
+
 def bind_call(spec, nargs, keywords, star_args=False, star_kwargs=False):
     """(param, message) pairs that make this call raise TypeError.
 

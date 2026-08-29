@@ -230,9 +230,10 @@ comfy.ldm.lightricks.model.precompute_freqs_cis
 
 ### `derive-requires`: what should my pyproject claim?
 
-For pack authors. Finds the oldest ComfyUI release in which every symbol your
-pack references already exists, and the first release in which one of them stops
-existing.
+For pack authors. Finds the oldest ComfyUI release that satisfies your pack,
+and the first release that stops satisfying it. A release satisfies the pack
+when every symbol it references exists **and** every call it makes still binds,
+so a floor is never lower than the ComfyUI that first accepted your call.
 
 ```
 $ comfy-import-guard derive-requires ./ComfyUI-TeaCache
@@ -263,6 +264,33 @@ Paste under [tool.comfy] in the pack's pyproject.toml:
   requires-comfyui = ">=0.30.0"
 ```
 
+A keyword argument alone can set the floor. `comfy.utils.load_torch_file` has
+existed since the beginning, but its `return_metadata` parameter only landed in
+v0.3.20, so a pack passing it does not work on anything older:
+
+```
+$ comfy-import-guard derive-requires ./uses-new-kwarg
+derive-requires: uses-new-kwarg
+  1 python file(s), 2 hard comfy.* reference(s), 1 call site(s)
+  floor set by  : comfy.utils.load_torch_file (call)
+  probed 8 release tag(s)
+
+Paste under [tool.comfy] in the pack's pyproject.toml:
+
+  requires-comfyui = ">=0.3.20"
+```
+
+Presence alone would have said `>=0.0.1` there, which installs onto a ComfyUI
+where that call raises TypeError. The reverse works too: passing a parameter
+that upstream has since dropped produces a ceiling, so a pack calling
+`pick_operations(..., scaled_fp8=...)` derives `>=0.2.4,<0.4.0` with no removed
+symbol involved at all.
+
+Across the 20-pack corpus the signature constraint changed no derived range,
+which is the point: it closes a hole without inflating anybody's floor. Pass
+`--no-signatures` to derive from imports alone. It costs roughly 60% more time
+on the largest pack measured (21s to 34s), and nothing noticeable on small ones.
+
 `requires-comfyui` is the [Comfy Registry field](https://docs.comfy.org/registry/specifications)
 that tells ComfyUI-Manager which ComfyUI versions your node supports.
 
@@ -289,7 +317,7 @@ returns `{"ok": false, "hint": "..."}` telling you which command to run once.
 | `--param NAME` | on `blame`: attribute a parameter of the symbol instead of the symbol |
 | `--cache-dir` | where the ComfyUI clone lives |
 | `--ledger` | alternate `ledger.json` |
-| `--no-signatures` | skip call-site and monkeypatch signature checks |
+| `--no-signatures` | on `check`: skip the signature pass. On `derive-requires`: derive from symbol presence only |
 | `--offline` | never touch the network; answer from the existing clone and the ledger |
 | `--no-update` | skip the `git fetch` before checking |
 | `--json` | machine-readable output for every command |
@@ -358,12 +386,12 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-117 tests. They assert against live public ComfyUI history rather than recorded
+124 tests. They assert against live public ComfyUI history rather than recorded
 fixtures: the real commits `f2b002372` and `bdcb886a4`, the real tags
-`v0.7.0`/`v0.8.0` and `v0.30.2`/`v0.31.0`, and for the signature checks the
-real parameter additions behind issues #5355 and #12134 (`c26ca2720` and
-`0d720e436`). They need `git` and a one-time clone, and skip cleanly if
-neither is available.
+`v0.7.0`/`v0.8.0` and `v0.30.2`/`v0.31.0`, the real parameter additions behind
+issues #5355 and #12134 (`c26ca2720` and `0d720e436`), and the real
+`return_metadata` boundary at v0.3.20 that the derived floor must respect.
+They need `git` and a one-time clone, and skip cleanly if neither is available.
 
 ## Publishing
 
