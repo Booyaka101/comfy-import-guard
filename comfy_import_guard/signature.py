@@ -170,7 +170,7 @@ def lookup_in_tree(tree, module, rest):
     if not isinstance(meth, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return SignatureLookup(UNRESOLVED, module, qual,
                                detail="no plain method %s on class %s" % (rest[1], rest[0]))
-    deco = [_deco_name(d) for d in meth.decorator_list]
+    deco = [name_of(d) for d in meth.decorator_list]
     if any(d not in _METHOD_DECORATORS for d in deco):
         return SignatureLookup(UNRESOLVED, module, qual,
                                detail="decorated; the wrapper may change the signature")
@@ -206,7 +206,8 @@ def _find_def(body, name):
     return found
 
 
-def _deco_name(node):
+def name_of(node):
+    """Trailing name of a Name or Attribute node, or None."""
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):

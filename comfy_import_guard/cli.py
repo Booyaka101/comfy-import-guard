@@ -5,7 +5,13 @@ import json
 import sys
 
 from . import __version__
-from .blame import blame_symbol, ledger_hit, record
+from .blame import (
+    blame_signature,
+    blame_symbol,
+    ledger_hit,
+    record,
+    split_signature_target,
+)
 from .derive import derive_requires
 from .errors import GuardError
 from .ledger import Ledger
@@ -59,6 +65,7 @@ def build_parser():
 
     b = sub.add_parser("blame", help="name the commit and PR that removed a symbol")
     b.add_argument("symbol", help="e.g. comfy.ldm.minimax.model.time_shift_slope")
+    b.add_argument("--param", help="blame a parameter of that symbol instead of the symbol itself")
     b.add_argument("--no-ledger", action="store_true", help="ignore the ledger, always use git")
     b.add_argument("--record", action="store_true", help="write the result back to the ledger")
     b.add_argument("--head", default=DEFAULT_TARGET, help="ref treated as current")
@@ -105,6 +112,16 @@ def _dispatch(args):
         return 1 if rep["totals"]["will_break"] else 0
 
     if args.command == "blame":
+        if args.param:
+            repo.ensure(deep=True)
+            module, qualname = split_signature_target(repo, args.symbol, args.head)
+            rep = blame_signature(repo, module, qualname, args.param, head=args.head)
+            if args.json:
+                print(json.dumps(rep, indent=2))
+            else:
+                _print_param_blame(rep)
+            return 0 if rep.get("changed_in_commit") else 1
+
         use_ledger = not args.no_ledger
         if not (use_ledger and ledger_hit(ledger, args.symbol)):
             repo.ensure(deep=True)   # only clone when the ledger cannot answer
@@ -178,6 +195,11 @@ def _print_check(rep):
             print("                %s" % row["detail"])
             _print_signature_attribution(row.get("attribution"))
         for row in p["soft"]:
+            if row.get("status") == "SIGNATURE_SHIM":
+                print("       SHIM     %s  %s:%s" % (
+                    row["dotted"], row["file"], row["line"]))
+                print("                %s" % row["detail"])
+                continue
             print("       SOFT     %s  %s:%s (guarded by try/except)" % (
                 row["dotted"], row["file"], row["line"]))
         for row in p["unresolvable"]:
@@ -244,6 +266,25 @@ def _print_blame(rep):
         print("  known packs   : %s" % ", ".join(rep["packs"]))
     if rep.get("note"):
         print("  note          : %s" % rep["note"])
+
+
+def _print_param_blame(rep):
+    print("%s.%s  parameter '%s'" % (rep["module"], rep["qualname"], rep["param"]))
+    if not rep.get("changed_in_commit"):
+        print("  status        : no change found in %s" % rep["module_path"])
+        print("  note          : the parameter may predate the file, or the symbol "
+              "may not be a plain def")
+        return
+    print("  %-14s: %s" % (rep["direction"], rep["changed_in_commit"][:9]))
+    if rep.get("subject"):
+        print("  commit        : %s" % rep["subject"])
+    if rep.get("pr"):
+        print("  pull request  : Comfy-Org/ComfyUI#%s" % rep["pr"])
+        print("                  https://github.com/comfyanonymous/ComfyUI/pull/%s" % rep["pr"])
+    if rep.get("changed_on"):
+        print("  changed on    : %s" % rep["changed_on"])
+    print("  last good tag : %s" % (rep.get("last_good_tag") or "none"))
+    print("  first bad tag : %s" % (rep.get("first_bad_tag") or "not released yet"))
 
 
 def _print_derive(rep):

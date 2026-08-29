@@ -121,9 +121,11 @@ comfy-import-guard check
                 last good v0.7.0, first bad v0.8.0
 
 [??] comfyui-minimax-h3-blockcache-T8  WARN
-     5 python file(s), 25 comfy.* reference(s)
+     5 python file(s), 34 comfy.* reference(s)
        SOFT     comfy.ldm.minimax.model.time_shift_slope  nodes.py:15 (guarded by try/except)
-     note: 1 guarded import(s) that would fail
+       SHIM     comfy.model_prefetch.cleanup_prefetched_modules  nodes.py:96
+                missing required argument 'comfy_modules'; another call to it in this file binds, so this looks like a version shim
+     note: 1 guarded reference(s) that would fail; 1 version-shim call(s) that do not bind here
 
 3 pack(s): 2 will break, 0 safe, 1 warn, 0 skipped; 3 breaking reference(s)
 Run `comfy-import-guard blame <module.Symbol>` for the commit that removed it.
@@ -160,16 +162,39 @@ parameter the upstream original has. Whether core passes that argument on your
 path is not statically decidable, so it grades WARN, not a break. Both name
 the commit that moved the signature, same as removals do.
 
+A pack that supports several ComfyUI versions calls the same function with one
+arity per branch behind a `hasattr` probe. Exactly one branch binds at any
+given ref, so the other is dead code there, not a bug. Those are reported as
+`SHIM` under WARN rather than failing the build, as in the T8 pack above.
+
 Measured before shipping on 20 real popular packs (Impact-Pack, KJNodes,
 Manager, WAS suite, IPAdapter_plus, VideoHelperSuite and friends: 1,273 Python
-files, 1,174 direct `comfy.*` call sites, 10 monkeypatches): 2 findings, both
-of them true on hand-verification against the pack and ComfyUI source, 18 of
-20 packs silent. The `pick_operations` row above is one of the two, a live
-TypeError in Easy-Use's BrushNet path. Calls spreading `*args`/`**kwargs`,
-decorated targets or replacements, `functools.partial`, and anything the alias
-machinery cannot resolve stay silent by design; the corpus's other nine
-monkeypatches either match upstream exactly or take `**kwargs`, and none of
-them fired. `--no-signatures` turns the whole pass off.
+files, 1,116 checkable `comfy.*` call sites, 10 monkeypatches): 2 findings,
+both true on hand-verification against the pack and ComfyUI source, 18 of 20
+packs silent. The `pick_operations` row above is one of the two, a live
+TypeError in Easy-Use's BrushNet path.
+
+Silent by design: calls spreading `*args`/`**kwargs`, decorated targets or
+replacements, `functools.partial`, names the file rebinds to something else,
+calls guarded by `except TypeError`, and anything the alias machinery cannot
+resolve. `--no-signatures` turns the whole pass off.
+
+### `blame --param`: who moved this parameter?
+
+```
+$ comfy-import-guard blame comfy.lora.calculate_weight --param intermediate_dtype
+comfy.lora.calculate_weight  parameter 'intermediate_dtype'
+  added         : c26ca2720
+  commit        : Move calculate function to comfy.lora
+  changed on    : 2024-08-22T17:12:00-04:00
+  last good tag : v0.1.0
+  first bad tag : v0.1.1
+```
+
+Same walk as plain `blame`, but presence means "is a parameter of that def"
+rather than "is bound at module scope". It takes a class path too, so
+`blame comfy.ldm.wan.model.WanAttentionBlock.forward --param context_img_len`
+answers the #12134 question directly.
 
 ### `blame`: who removed this symbol?
 
@@ -261,6 +286,7 @@ returns `{"ok": false, "hint": "..."}` telling you which command to run once.
 | `--comfy-dir` | ComfyUI install root, or a `custom_nodes` directory directly |
 | `--target` | ref to resolve against (tag, sha, `origin/master`) |
 | `--pack NAME` | check only these packs (repeatable) |
+| `--param NAME` | on `blame`: attribute a parameter of the symbol instead of the symbol |
 | `--cache-dir` | where the ComfyUI clone lives |
 | `--ledger` | alternate `ledger.json` |
 | `--no-signatures` | skip call-site and monkeypatch signature checks |
@@ -277,7 +303,7 @@ Global flags work before or after the subcommand.
 | --- | --- |
 | `SAFE` | every reference resolves and every checkable call binds at the target ref |
 | `WILL BREAK` | an unguarded reference is gone (`MISSING`), or a call cannot bind (`BADCALL`); exit code 1 |
-| `WARN` | only guarded (`try/except`) references fail, a monkeypatch is behind the upstream signature (`SIGDRIFT`), or something could not be resolved statically |
+| `WARN` | only guarded (`try/except`) references fail, a monkeypatch is behind the upstream signature (`SIGDRIFT`), a call is a version shim (`SHIM`), or something could not be resolved statically |
 | `SKIPPED` | the pack vendors its own `comfy/` package, so it resolves pack-locally |
 
 ## How it works
@@ -308,9 +334,11 @@ Only the public ComfyUI git repository is used. No API, no token, no account.
 - **`from comfy.x import *`** is reported as unresolvable, not guessed.
 - **Attribute chains are best-effort.** `comfy.samplers.KSampler.SAMPLERS`
   is checked as far as `KSampler`; class internals are not tracked.
-- **Local shadowing is not modelled.** A local variable that happens to reuse an
-  alias name can produce a spurious reference. It shows up as `WARN`/`MISSING`
-  with a file and line, so it is cheap to dismiss.
+- **Local shadowing is not modelled for references.** A local variable that
+  happens to reuse an alias name can produce a spurious reference. It shows up
+  as `WARN`/`MISSING` with a file and line, so it is cheap to dismiss. Call
+  sites are held to a stricter rule, because a bad bind is a hard failure: any
+  name the file rebinds is dropped from signature checking entirely.
 - **Signature checks cover parameter lists, not behaviour.** A changed return
   type, a changed default value, or changed semantics behind an unchanged
   parameter list are all still invisible. Calls that spread `*args`/`**kwargs`,
@@ -330,7 +358,7 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-107 tests. They assert against live public ComfyUI history rather than recorded
+117 tests. They assert against live public ComfyUI history rather than recorded
 fixtures: the real commits `f2b002372` and `bdcb886a4`, the real tags
 `v0.7.0`/`v0.8.0` and `v0.30.2`/`v0.31.0`, and for the signature checks the
 real parameter additions behind issues #5355 and #12134 (`c26ca2720` and

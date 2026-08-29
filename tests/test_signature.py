@@ -85,7 +85,7 @@ def test_class_without_own_init_is_unresolved():
 
 def test_render_marks_defaults_and_stars():
     s = spec("def f(a, b=1, *args, c, **kw): pass")
-    assert s.render() == "(a, b=..., *args, c, **kw" + "args)"
+    assert s.render() == "(a, b=..., *args, c, **kwargs)"
 
 
 # ------------------------------------------------------------- binding
@@ -286,6 +286,49 @@ def test_monkeypatch_in_try_except_is_soft():
     assert patches[0].soft is True
 
 
+def test_shadowed_name_is_not_a_call_site():
+    """A rebound name is not that callable any more.
+
+    Presence checks can be loose here and grade the result WARN. A call site
+    cannot: a bad bind is a hard WILL BREAK, so shadowing must silence it.
+    """
+    shadowing = {
+        "rebound": "calculate_weight = my_impl\ncalculate_weight(1)\n",
+        "local def": "def calculate_weight(x):\n    return x\ncalculate_weight(1)\n",
+        "parameter": "def outer(calculate_weight):\n    return calculate_weight(1)\n",
+        "for target": "for calculate_weight in xs:\n    calculate_weight(1)\n",
+        "with as": "with open(p) as calculate_weight:\n    calculate_weight(1)\n",
+        "except as": "try:\n    pass\nexcept E as calculate_weight:\n    calculate_weight(1)\n",
+        "walrus": "if (calculate_weight := f()):\n    calculate_weight(1)\n",
+        "later import": "from mypack import calculate_weight\ncalculate_weight(1)\n",
+    }
+    for label, tail in shadowing.items():
+        calls, _ = calls_of("from comfy.lora import calculate_weight\n" + tail)
+        assert calls == [], label
+
+
+def test_shadowed_root_alias_is_not_a_call_site():
+    calls, _ = calls_of(
+        "import comfy.lora\n"
+        "def f(comfy):\n"
+        "    return comfy.lora.calculate_weight(1, 2, 3)\n"
+    )
+    assert calls == []
+
+
+def test_saving_the_original_before_patching_still_resolves():
+    """The save-then-patch idiom must survive the shadowing guard."""
+    calls, patches = calls_of(
+        "import comfy.samplers\n"
+        "def mine(a):\n    return a\n"
+        "orig = comfy.samplers.sample\n"
+        "comfy.samplers.sample = mine\n"
+        "orig(1)\n"
+    )
+    assert [c.dotted for c in calls] == ["comfy.samplers.sample"]
+    assert len(patches) == 1
+
+
 def test_monkeypatch_of_imported_function_is_silent():
     _, patches = calls_of(
         "import comfy.lora\n"
@@ -430,6 +473,59 @@ def test_guarded_bad_call_is_soft_not_breaking(repo, tmp_path):
     assert any(r.get("status") == "SIGNATURE" for r in pack["soft"])
 
 
+def test_version_shim_is_not_a_hard_break(repo, tmp_path):
+    """A hasattr-guarded arity shim must not fail the pack's CI.
+
+    Reconstructed from comfyui-minimax-h3-blockcache-T8, which probes
+    ComfyUI for the newer signature and calls the right arity per branch.
+    Exactly one branch binds at any ref; the other is dead code there.
+    """
+    root = _install(tmp_path, "shim-pack",
+                    "import comfy.lora\n"
+                    "NEW = hasattr(comfy.lora, 'calculate_shape')\n"
+                    "def go(p, w, k, dt):\n"
+                    "    if NEW:\n"
+                    "        return comfy.lora.calculate_weight(p, w, k, dt)\n"
+                    "    return comfy.lora.calculate_weight(p, w, k, dt, None, 'extra')\n")
+    pack = check(repo, str(root), "origin/master", Ledger())["packs"][0]
+    assert pack["verdict"] == WARN
+    assert pack["breaking"] == []
+    shims = [r for r in pack["soft"] if r.get("status") == "SIGNATURE_SHIM"]
+    assert len(shims) == 1
+    assert "version shim" in shims[0]["detail"]
+
+
+def test_lone_bad_call_is_still_a_hard_break(repo, tmp_path):
+    """The shim rule must not swallow a target called only one way."""
+    root = _install(tmp_path, "lone-caller",
+                    "import comfy.lora\n"
+                    "comfy.lora.calculate_weight(1, 2, 3, nope=1)\n")
+    pack = check(repo, str(root), "origin/master", Ledger())["packs"][0]
+    assert pack["verdict"] == WILL_BREAK
+
+
+def test_except_typeerror_softens_a_call(repo, tmp_path):
+    root = _install(tmp_path, "typeerror-pack",
+                    "import comfy.lora\n"
+                    "try:\n"
+                    "    comfy.lora.calculate_weight(1, 2, 3, nope=1)\n"
+                    "except TypeError:\n"
+                    "    pass\n")
+    pack = check(repo, str(root), "origin/master", Ledger())["packs"][0]
+    assert pack["verdict"] == WARN
+    assert pack["breaking"] == []
+
+
+def test_except_typeerror_does_not_soften_an_import():
+    """TypeError softens calls only; an import guarded by it is still hard."""
+    from comfy_import_guard.extract import extract_references
+    rs = extract_references(ast.parse("try:\n"
+                                      "    from comfy.utils import Gone\n"
+                                      "except TypeError:\n"
+                                      "    pass\n"), "x.py")
+    assert rs[0].soft is False
+
+
 def test_no_signatures_flag_disables_the_pass(repo, tmp_path):
     root = _install(tmp_path, "outdated-lora-pack", TEACACHE_5355)
     rep = check(repo, str(root), "origin/master", Ledger(), signatures=False)
@@ -473,3 +569,28 @@ def test_cli_parses_no_signatures():
     from comfy_import_guard.cli import build_parser
     args = build_parser().parse_args(["check", "--comfy-dir", "x", "--no-signatures"])
     assert args.no_signatures is True
+
+
+def test_cli_parses_blame_param():
+    from comfy_import_guard.cli import build_parser
+    args = build_parser().parse_args(
+        ["blame", "comfy.lora.calculate_weight", "--param", "intermediate_dtype"])
+    assert args.param == "intermediate_dtype"
+
+
+def test_split_signature_target_keeps_the_class(repo):
+    from comfy_import_guard.blame import split_signature_target
+    module, qual = split_signature_target(
+        repo, "comfy.ldm.wan.model.WanAttentionBlock.forward")
+    assert module == "comfy.ldm.wan.model"
+    assert qual == "WanAttentionBlock.forward"
+
+
+def test_blame_param_end_to_end(repo, capsys):
+    from comfy_import_guard.cli import main
+    code = main(["blame", "comfy.ldm.wan.model.WanAttentionBlock.forward",
+                 "--param", "context_img_len", "-q"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert CONTEXT_IMG_LEN_ADDED_IN[:9] in out
+    assert "v0.3.29" in out

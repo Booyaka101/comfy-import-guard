@@ -150,8 +150,12 @@ def _check_pack(resolver, name, path, ledger, sig=None, blame_cache=None):
         bits = []
         if out["unresolvable"]:
             bits.append("%d unresolvable reference(s)" % len(out["unresolvable"]))
-        if out["soft"]:
-            bits.append("%d guarded import(s) that would fail" % len(out["soft"]))
+        shims = [r for r in out["soft"] if r.get("status") == "SIGNATURE_SHIM"]
+        if len(out["soft"]) > len(shims):
+            bits.append("%d guarded reference(s) that would fail"
+                        % (len(out["soft"]) - len(shims)))
+        if shims:
+            bits.append("%d version-shim call(s) that do not bind here" % len(shims))
         if out["signature_drift"]:
             bits.append("%d monkeypatch(es) behind the upstream signature" % len(out["signature_drift"]))
         if out["unparseable"]:
@@ -175,6 +179,7 @@ def _check_signatures(sig, scan, out, blame_cache):
             "status": "TARGET_UNPARSED", "detail": lk.detail,
         })
 
+    bound = []
     for call in scan.call_sites:
         lk = sig.lookup(call.dotted)
         if lk.status == PARSE_FAILED:
@@ -184,6 +189,18 @@ def _check_signatures(sig, scan, out, blame_cache):
             continue
         problems = bind_call(lk.spec, call.nargs, call.keywords,
                              call.star_args, call.star_kwargs)
+        bound.append((call, lk, problems))
+
+    # A pack that supports several ComfyUI versions calls the same function
+    # with one arity per branch behind a hasattr probe, so exactly one branch
+    # binds at any given ref and the others are dead code there. Failing that
+    # pack's CI for the dead branch punishes the packs doing compatibility
+    # right, so a failing call whose sibling in the same file binds is a shim.
+    shim_targets = {
+        (c.file, c.dotted) for c, _, problems in bound if problems == []
+    }
+
+    for call, lk, problems in bound:
         if not problems:
             continue
         row = {
@@ -197,6 +214,12 @@ def _check_signatures(sig, scan, out, blame_cache):
             "detail": "; ".join(m for _, m in problems),
             "upstream_params": lk.spec.render(),
         }
+        if (call.file, call.dotted) in shim_targets:
+            row["status"] = "SIGNATURE_SHIM"
+            row["detail"] += "; another call to it in this file binds, so this "\
+                             "looks like a version shim"
+            out["soft"].append(row)
+            continue
         if call.soft:
             row["soft"] = True
             out["soft"].append(row)

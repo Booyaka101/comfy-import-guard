@@ -28,11 +28,23 @@ release checks for that class statically.
   replacements, `functools.partial`, and anything the alias machinery cannot
   resolve stay silent by design. A target module that fails to parse at the
   ref is counted, never silently passed.
-- New `--no-signatures` flag on `check` turns the whole pass off.
+- A call whose sibling in the same file binds is treated as a version shim and
+  reported as `SHIM` under WARN, not as a break. Packs that support several
+  ComfyUI versions probe with `hasattr` and call one arity per branch, so the
+  branch that does not bind is dead code at that ref. Failing their build for
+  it would punish exactly the packs handling compatibility properly.
+- `except TypeError` around a call softens it, the same way `except
+  ImportError` already softens an import. It does not soften imports.
+- Names the file rebinds (a local `def`, a parameter, a loop target, a later
+  import of the same name) are dropped from call checking. Presence checks can
+  afford to be loose about shadowing and grade the result WARN; a call site
+  cannot, because a bad bind is a hard failure.
+- New `--no-signatures` flag on `check` turns the whole pass off, and
+  `blame <symbol> --param <name>` attributes a parameter rather than a symbol.
 - Measured before shipping on 20 real popular packs (1,273 Python files,
-  1,174 `comfy.*` call sites, 10 monkeypatches): 2 findings, both true on
-  hand-verification against pack and ComfyUI source, 18 of 20 packs silent.
-  One is a live TypeError in ComfyUI-Easy-Use's BrushNet path
+  1,116 checkable `comfy.*` call sites, 10 monkeypatches): 2 findings, both
+  true on hand-verification against pack and ComfyUI source, 18 of 20 packs
+  silent. One is a live TypeError in ComfyUI-Easy-Use's BrushNet path
   (`pick_operations` lost `scaled_fp8` in PR #11000).
 - The check summary line now says "breaking reference(s)" instead of
   "missing symbol(s)", since a breaking row can now be a call, not a symbol.

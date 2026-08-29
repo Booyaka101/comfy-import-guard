@@ -59,7 +59,8 @@ controlnet_aux, cg-use-everywhere), plus the real local install.
 Result against origin/master (`e7051b037`), full JSON at
 `D:\tmp\cig-corpus\report.json`:
 
-- 1,273 Python files, 1,992 references, 1,174 direct call sites, 10 monkeypatches
+- 1,273 Python files, 1,992 references, 1,116 checkable call sites (1,174
+  before the review's shadow guard dropped 58), 10 monkeypatches
 - signature findings: **2**, both in ComfyUI-Easy-Use, both hand-verified true
   - BADCALL `comfy.ops.pick_operations` brushnet/__init__.py:676 passes
     `scaled_fp8=`, removed upstream by `43071e3de` PR #11000 (v0.3.77 ->
@@ -74,11 +75,54 @@ Result against origin/master (`e7051b037`), full JSON at
   `precompute_freqs_cis`, efficiency-nodes and WAS report their own known
   missing symbols, 15/20 SAFE.
 
+## Senior review pass (2026-08-29, after the first 1.1.0 build)
+
+Three defects found by reviewing the first cut, all fixed and regression-tested.
+Two of them would have failed real users' CI on working code.
+
+1. **Shadowed names produced hard false positives.** `from comfy.lora import
+   calculate_weight` followed by any rebinding of that name (a local `def`, a
+   parameter, a loop target, a walrus, a later import) still resolved calls
+   against upstream, so a pack with its own `calculate_weight` would be graded
+   WILL BREAK on code that is fine. Fixed with a file-wide conservative shadow
+   set applied to call targets only, so 1.0.x reference behaviour is untouched.
+   Dropped 58 of 1,174 corpus call sites, none of which were producing
+   findings.
+2. **Version shims produced hard false positives, and this one is worse
+   because it punishes the careful packs.** comfyui-minimax-h3-blockcache-T8
+   probes `hasattr(comfy.model_prefetch, "GRAPH_MODULES")` and calls the
+   matching arity in each branch. Exactly one branch binds at any ref, so the
+   other is dead code there, and the tool graded the pack WILL BREAK. Now a
+   failing call whose sibling in the same file binds is a `SHIM` row under
+   WARN with the reason printed. `except TypeError` also softens a call now,
+   since that is the explicit "I know the signature moved" idiom.
+3. **`_name_of` and `_deco_name` were an 83% clone** (house rule: diff new
+   functions against the ones they parallel). Collapsed into one `name_of` in
+   signature.py. A full difflib sweep now reports 0 of 91 function pairs over
+   the 60% threshold.
+
+Also: CHANGELOG.md was missing from the sdist include list, and the
+`blame --param` output column was misaligned by one. Both fixed.
+
 ## What is VERIFIED working
 
-- 107 tests green: `python -m pytest tests -q` (59 existing + 48 new; the two
-  issue-reconstruction fixtures assert rule, file, line, blamed commit and tag
-  boundary against live history).
+- 117 tests green on Python 3.11 and 3.12: `python -m pytest tests -q` (59
+  existing + 58 new; the two issue-reconstruction fixtures assert rule, file,
+  line, blamed commit and tag boundary against live history).
+- Corpus re-run after each review fix, compared row by row against the
+  previous JSON: both true findings survive, all 20 verdicts unchanged, zero
+  shim suppressions on the corpus. Reports kept at
+  `D:\tmp\cig-corpus\report{,2,3}.json`.
+- The HTTP route driven for real under aiohttp with a stand-in PromptServer:
+  HTTP 200, `ok: true`, and the Easy-Use badcall + drift rows present in the
+  JSON the route returns.
+- `blame --param intermediate_dtype` from the installed wheel names
+  `c26ca2720` with the v0.1.0/v0.1.1 boundary.
+- Every error path still prints a message and exits 2, never a traceback:
+  missing dir, no custom_nodes, non-comfy path, invented module, missing pack,
+  and an unknown `--param` (exit 1 with an explanation).
+- sdist and wheel contents listed and checked: `signature.py` and CHANGELOG.md
+  both shipped, ledger.json still force-included in the wheel.
 - Worked example reproduced exactly: 3-param `my_calculate_weight` monkeypatch
   gives SIGDRIFT WARN naming `intermediate_dtype`/`original_weights`; an
   unknown-keyword call gives a BADCALL hard row with the upstream parameter
@@ -95,22 +139,26 @@ Result against origin/master (`e7051b037`), full JSON at
 
 ## Non-obvious decisions future work must not undo
 
-1. **Access through a class yields the plain function**, so a call site
+1. **Call checking is deliberately stricter about shadowing than reference
+   checking.** Do not "simplify" by reusing one shadow policy for both: a
+   spurious reference is a WARN somebody dismisses, a spurious bind is a red
+   CI. Same reason the shim rule exists.
+2. **Access through a class yields the plain function**, so a call site
    `Cls.method(obj, x)` passes self explicitly and a replacement is written
    with self: nothing is dropped on either side. Only `classmethod` (cls binds
    on access) and constructor calls (`Cls(...)` binds against `__init__`) drop
    the first parameter.
-2. **`_value_alias_map` (local `orig = comfy.x.f` aliases) feeds only call
+3. **`_value_alias_map` (local `orig = comfy.x.f` aliases) feeds only call
    resolution, never `_attribute_refs`.** Feeding it into reference extraction
    would change 1.0.x verdicts.
-3. **Everything undecidable is silent**: `*`/`**` at the call, decorated
+4. **Everything undecidable is silent**: `*`/`**` at the call, decorated
    targets or replacements, `functools.partial`, duplicate same-name defs with
    different params, re-exported names, more than one class level. The corpus
-   run is the evidence this calibration is right (2 findings / 1,174 calls,
+   run is the evidence this calibration is right (2 findings / 1,116 calls,
    both true).
-4. **The summary line now says "breaking reference(s)"** because a breaking
+5. **The summary line now says "breaking reference(s)"** because a breaking
    row can be a call. README examples were updated to match.
-5. Signature blame walks the same word-anchored pickaxe as removals; the
+6. Signature blame walks the same word-anchored pickaxe as removals; the
    POSIX-ERE/lookbehind trap from LESSONS applies here too.
 
 ## Left undone (deliberate)

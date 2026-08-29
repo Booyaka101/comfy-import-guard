@@ -45,6 +45,28 @@ def split_dotted(repo, dotted, ref="origin/master"):
     )
 
 
+def split_signature_target(repo, dotted, ref="origin/master"):
+    """Split ``comfy.a.b.Class.method`` into (module, qualname) using the tree.
+
+    Unlike ``split_dotted`` this keeps every part after the module, because a
+    signature lookup needs ``Class.method``, not just ``Class``.
+    """
+    if not dotted.startswith("comfy."):
+        raise BadInputError(
+            "Expected a dotted path into ComfyUI internals, e.g. "
+            "comfy.lora.calculate_weight (got %r)." % dotted
+        )
+    parts = dotted.split(".")
+    resolver = Resolver(repo, ref)
+    for i in range(len(parts) - 1, 0, -1):
+        if resolver.module_source(".".join(parts[:i]))[0] is not None:
+            return ".".join(parts[:i]), ".".join(parts[i:])
+    raise BadInputError(
+        "No module in %r has source at %s. --param needs a symbol that still "
+        "exists; for a removed symbol use plain blame." % (dotted, ref)
+    )
+
+
 def module_path_at(repo, module, ref):
     """Repo path of ``module`` at ``ref``, preferring whichever form exists."""
     base = module.replace(".", "/")

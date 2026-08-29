@@ -63,6 +63,7 @@ include = [
   "ledger.json",
   "icon.svg",
   "README.md",
+  "CHANGELOG.md",
   "LICENSE",
 ]
 
