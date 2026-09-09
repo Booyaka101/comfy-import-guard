@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1 - 2026-09-09
+
+Hardening for the HTTP route. The `target` query parameter is the only
+attacker-controlled input on it, and it reaches git only as a positional argv
+token in a list, never through a shell. It is now validated at the route
+boundary as well: a ref must start with an alphanumeric, so it can never be
+read as a `-` option, and may hold only ref-safe characters with no whitespace
+or shell metacharacters. Anything else returns 400 before git is invoked.
+
 ## 1.1.0 - 2026-08-29
 
 Import success is necessary but not sufficient. The loudest custom-node
