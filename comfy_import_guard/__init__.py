@@ -6,12 +6,20 @@ ComfyUI ref. Every ComfyUI-specific import is guarded so that a plain
 ``pip install comfy-import-guard`` outside ComfyUI imports cleanly.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
 ROUTE = "/comfy_import_guard/report"
+
+# A git ref, tag or sha: must start with an alphanumeric (so it can never be
+# read as a `-`-prefixed git option) and hold only ref-safe characters, no
+# whitespace or shell metacharacters. The route passes ``target`` to git as a
+# positional argv token, never through a shell, so this is defence in depth: it
+# rejects option-shaped input at the untrusted boundary before git sees it.
+import re as _re
+_REF = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/~^@{}:-]{0,199}$")
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "__version__", "ROUTE"]
 
@@ -82,6 +90,12 @@ def _register_routes():
     @PromptServer.instance.routes.get(ROUTE)
     async def comfy_import_guard_report(request):
         target = request.query.get("target", "origin/master")
+        if not _REF.match(target):
+            return web.json_response(
+                {"ok": False, "error": "invalid target ref; expected a git ref, "
+                 "tag or sha such as origin/master or v0.32.0"},
+                status=400,
+            )
         loop = asyncio.get_event_loop()
         try:
             data = await loop.run_in_executor(None, _build_report, target, comfy_dir)
