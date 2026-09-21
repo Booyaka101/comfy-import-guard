@@ -1,7 +1,8 @@
-"""Command line entry point: check / blame / derive-requires."""
+"""Command line entry point: check / blame / derive-requires / crawl."""
 
 import argparse
 import json
+import os
 import sys
 
 from . import __version__
@@ -12,8 +13,9 @@ from .blame import (
     record,
     split_signature_target,
 )
+from .crawl import BOARD_JSON, BOARD_MD, DEFAULT_LIMIT, DEFAULT_MAX_ZIP_MB, crawl
 from .derive import derive_requires
-from .errors import GuardError
+from .errors import BadInputError, GuardError
 from .ledger import Ledger
 from .report import SAFE, SKIPPED, WARN, WILL_BREAK, check
 from .repo import Repo
@@ -49,7 +51,7 @@ def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     _add_globals(common, suppress=True)
 
-    sub = p.add_subparsers(dest="command", metavar="{check,blame,derive-requires}",
+    sub = p.add_subparsers(dest="command", metavar="{check,blame,derive-requires,crawl}",
                            parser_class=lambda **kw: argparse.ArgumentParser(
                                parents=[common], **kw))
 
@@ -75,6 +77,23 @@ def build_parser():
     d.add_argument("--no-update", action="store_true", help="skip git fetch")
     d.add_argument("--no-signatures", action="store_true",
                    help="derive from symbol presence only, ignoring call signatures")
+
+    w = sub.add_parser("crawl", help="build a compatibility board from the Comfy Registry")
+    w.add_argument("--out", required=True,
+                   help="directory to write %s and %s into" % (BOARD_JSON, BOARD_MD))
+    w.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
+                   help="how many packs to take (default: %d; 0 means the whole registry)"
+                        % DEFAULT_LIMIT)
+    w.add_argument("--target", default=DEFAULT_TARGET,
+                   help="ComfyUI ref to resolve against (default: %s)" % DEFAULT_TARGET)
+    w.add_argument("--min-downloads", type=int, default=0,
+                   help="skip packs the registry reports fewer downloads for")
+    w.add_argument("--max-zip-mb", type=float, default=DEFAULT_MAX_ZIP_MB,
+                   help="refuse pack archives larger than this (default: %d)"
+                        % DEFAULT_MAX_ZIP_MB)
+    w.add_argument("--fresh", action="store_true",
+                   help="ignore any checkpoint in --out and start the crawl over")
+    w.add_argument("--no-update", action="store_true", help="skip git fetch")
     return p
 
 
@@ -149,7 +168,31 @@ def _dispatch(args):
             _print_derive(rep)
         return 0 if rep.get("line") else 1
 
+    if args.command == "crawl":
+        if args.offline:
+            raise BadInputError(
+                "crawl reads the Comfy Registry over the network, so --offline cannot "
+                "apply to it. Use `check` or `derive-requires` offline instead."
+            )
+        repo.ensure(deep=True)
+        if not args.no_update:
+            repo.update()
+        board = crawl(repo, args.out, limit=args.limit, target=args.target,
+                      max_zip_bytes=int(args.max_zip_mb * 1000 * 1000),
+                      min_downloads=args.min_downloads, ledger=ledger,
+                      fresh=args.fresh,
+                      log=None if args.quiet else _stderr)
+        if args.json:
+            print(json.dumps(board, indent=2))
+        else:
+            _print_crawl(board, args.out)
+        return 1 if board["totals"]["breaksAtRef"] else 0
+
     raise AssertionError("unreachable")
+
+
+def _stderr(msg):
+    print(msg, file=sys.stderr)
 
 
 # ------------------------------------------------------------------ rendering
@@ -329,6 +372,26 @@ def _print_derive(rep):
     print("Paste under [tool.comfy] in the pack's pyproject.toml:")
     print()
     print("  %s" % rep["line"])
+
+
+def _print_crawl(board, out_dir):
+    t = board["totals"]
+    print("crawl: %d pack(s) from %s, ComfyUI @ %s (%s)" % (
+        t["packs"], _netloc(board["registrySource"]),
+        board["comfyRef"], board["comfySha"][:9]))
+    print("  analysed %d, skipped %d" % (t["analysed"], t["skipped"]))
+    print("  breaks at %s: %d" % (board["comfyRef"], t["breaksAtRef"]))
+    print("  registry declares a range: %d   derived by us: %d"
+          % (t["registryDeclared"], t["derivedHere"]))
+    if t["disagree"] or t["notComparable"]:
+        print("  of those, %d agree, %d disagree, %d not comparable"
+              % (t["agree"], t["disagree"], t["notComparable"]))
+    print("wrote %s, %s" % (os.path.join(out_dir, BOARD_JSON),
+                            os.path.join(out_dir, BOARD_MD)))
+
+
+def _netloc(url):
+    return url.split("//", 1)[-1].split("/", 1)[0] or url
 
 
 if __name__ == "__main__":

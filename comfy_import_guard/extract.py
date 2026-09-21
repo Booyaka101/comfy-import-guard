@@ -6,7 +6,9 @@ when the only remaining occurrence is a private class method.
 """
 
 import ast
+import functools
 import os
+import zipfile
 from dataclasses import dataclass, field
 
 from .errors import BadInputError
@@ -102,13 +104,15 @@ class PackScan:
     python_files: int = 0
 
 
+def skipped_dir(name):
+    """A directory component no pack source descends into."""
+    return name in SKIP_DIRS or name.endswith(".egg-info") or name.startswith(".")
+
+
 def iter_python_files(root):
     """Yield .py files under ``root``, skipping caches, vendored trees and venvs."""
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in SKIP_DIRS and not d.endswith(".egg-info") and not d.startswith(".")
-        ]
+        dirnames[:] = [d for d in dirnames if not skipped_dir(d)]
         for fn in sorted(filenames):
             if fn.endswith(".py"):
                 yield os.path.join(dirpath, fn)
@@ -122,29 +126,145 @@ def has_vendored_comfy(pack_dir):
     return os.path.isfile(os.path.join(pack_dir, "comfy.py"))
 
 
-def scan_pack(pack_dir, name=None):
-    """Extract every comfy.* reference in one custom-node pack."""
-    pack_dir = os.path.abspath(os.path.expanduser(str(pack_dir)))
-    if not os.path.isdir(pack_dir):
-        raise BadInputError(
-            "No such custom-node pack directory: %s\n"
-            "Pass the folder that holds the pack's __init__.py." % pack_dir
-        )
-    scan = PackScan(name=name or os.path.basename(pack_dir.rstrip(os.sep)), path=pack_dir)
-    if has_vendored_comfy(pack_dir):
+class PackSource:
+    """Where ``scan_pack`` gets one pack's Python files.
+
+    Two of these exist: a directory, which is what ``check`` walks under
+    ``custom_nodes``, and a registry ``node.zip``, which is what ``crawl``
+    downloads. They differ in traversal only. Decoding, parsing, the counts and
+    every verdict downstream stay in ``scan_pack``, so a crawled pack and an
+    installed one produce the same ``PackScan``.
+    """
+
+    def __init__(self, name, path):
+        self.name = name
+        self.path = path
+
+    def iter_sources(self):
+        """Yield ``(posix relpath, read)``; ``read()`` gives bytes or raises OSError."""
+        raise NotImplementedError
+
+    def has_vendored_comfy(self):
+        raise NotImplementedError
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+class DirectorySource(PackSource):
+    """A pack unpacked on disk, as ComfyUI itself loads it."""
+
+    def __init__(self, pack_dir, name=None):
+        pack_dir = os.path.abspath(os.path.expanduser(str(pack_dir)))
+        if not os.path.isdir(pack_dir):
+            raise BadInputError(
+                "No such custom-node pack directory: %s\n"
+                "Pass the folder that holds the pack's __init__.py." % pack_dir
+            )
+        super().__init__(name or os.path.basename(pack_dir.rstrip(os.sep)), pack_dir)
+
+    def iter_sources(self):
+        for path in iter_python_files(self.path):
+            rel = os.path.relpath(path, self.path).replace(os.sep, "/")
+            yield rel, functools.partial(_read_bytes, path)
+
+    def has_vendored_comfy(self):
+        return has_vendored_comfy(self.path)
+
+
+def _read_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+# A hand-written .py never gets near this. Past it the member is generated data
+# or a decompression bomb, and either way ast.parse cannot repay the memory.
+MAX_MEMBER_BYTES = 4 * 1024 * 1024
+
+
+def is_pack_python(name):
+    """Whether a zip member is a .py the directory walker would also have read."""
+    if not name.endswith(".py"):
+        return False
+    parts = name.split("/")
+    if "" in parts or "." in parts or ".." in parts or ":" in parts[0]:
+        return False
+    return not any(skipped_dir(p) for p in parts[:-1])
+
+
+class ZipSource(PackSource):
+    """A registry ``node.zip``, read in place.
+
+    Members are decompressed one at a time into memory and never written out.
+    A whole-registry crawl touches thousands of packs, and nothing downstream
+    of ``scan_pack`` needs the files on disk.
+    """
+
+    def __init__(self, zip_path, name=None, max_member_bytes=MAX_MEMBER_BYTES):
+        zip_path = os.path.abspath(os.path.expanduser(str(zip_path)))
+        try:
+            self._zip = zipfile.ZipFile(zip_path)
+        except FileNotFoundError:
+            raise BadInputError("No such pack archive: %s" % zip_path)
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise BadInputError("%s is not a readable zip archive: %s" % (zip_path, exc))
+        super().__init__(name or os.path.basename(zip_path), zip_path)
+        self.max_member_bytes = max_member_bytes
+        self._members = {}
+        for info in self._zip.infolist():
+            rel = info.filename.replace("\\", "/")
+            if is_pack_python(rel):
+                self._members[rel] = info
+
+    def iter_sources(self):
+        for rel in sorted(self._members):
+            yield rel, functools.partial(self._read_member, rel)
+
+    def has_vendored_comfy(self):
+        return "comfy/__init__.py" in self._members or "comfy.py" in self._members
+
+    def close(self):
+        self._zip.close()
+
+    def _read_member(self, rel):
+        info = self._members[rel]
+        if info.file_size > self.max_member_bytes:
+            raise OSError("%.1f MB uncompressed, over the %.0f MB per-file cap"
+                          % (info.file_size / 1e6, self.max_member_bytes / 1e6))
+        try:
+            return self._zip.read(info)
+        except (zipfile.BadZipFile, RuntimeError, EOFError, ValueError) as exc:
+            # RuntimeError is what zipfile raises for an encrypted member.
+            raise OSError("corrupt or unreadable zip member: %s" % exc)
+
+
+def scan_pack(pack, name=None):
+    """Extract every comfy.* reference in one custom-node pack.
+
+    ``pack`` is a directory path, or a ``PackSource`` when the caller holds the
+    pack in another shape. ``name`` is ignored for a source, which names itself.
+    """
+    source = pack if isinstance(pack, PackSource) else DirectorySource(pack, name)
+    scan = PackScan(name=source.name, path=source.path)
+    if source.has_vendored_comfy():
         scan.vendored_comfy = True
         return scan
-    for path in iter_python_files(pack_dir):
+    for rel, read in source.iter_sources():
         scan.python_files += 1
-        rel = os.path.relpath(path, pack_dir).replace(os.sep, "/")
         try:
-            with open(path, "rb") as fh:
-                source = fh.read()
+            source_bytes = read()
         except OSError as exc:
             scan.unparseable.append((rel, "unreadable: %s" % exc))
             continue
         try:
-            tree = ast.parse(source, filename=path)
+            tree = ast.parse(source_bytes, filename=rel)
         except SyntaxError as exc:
             scan.unparseable.append((rel, "SyntaxError line %s: %s" % (exc.lineno, exc.msg)))
             continue

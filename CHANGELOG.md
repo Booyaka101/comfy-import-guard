@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.2.0 - 2026-09-21
+
+A `crawl` subcommand, for the question this tool could answer but could not
+reach: not "will my install survive" but "which packs in the registry are
+already broken, and do their declared ComfyUI ranges match what they actually
+use". It walks the public Comfy Registry listing, pulls each pack's latest
+`node.zip` from the CDN, and puts it through the same extract, resolve,
+signature and derive path `check` and `derive-requires` already use, pinned to
+one ComfyUI ref.
+
+From the first real run, 20 packs at `origin/master` (`b0f4b7b29`, registry
+total 5667 packs): 11 analysed, 9 skipped, 0 breaking at that ref. 2 declared a
+`supported_comfyui_version`, 5 had a range derived here, and of the packs where
+both exist, 0 agreed and 1 disagreed. The disagreement is
+`contextanchoredtilerefine` 1.6.1, which declares `>=0.3.45` while its use of
+`comfy.model_management.intermediate_dtype` implies `>=0.18.0`. 8 of the 9
+skips are packs with no published version in the registry, and 1 is an archive
+holding no Python files.
+
+- `crawl --out DIR` writes `board.json` and `board.md`. The JSON carries a
+  `schemaVersion`, the run timestamp, the exact ref and sha, and one record per
+  pack: publisher, name, version, the registry's `supported_comfyui_version`
+  verbatim, the derived range and what determined it, the hard `comfy.*`
+  reference count, and every already-removed symbol with its file and line. The
+  markdown puts packs that break at the ref first, and links each pack to the
+  repository the registry has on file for it.
+- Where the registry's declared range and the derived one disagree, the record
+  says so and names both. It does not pick a winner. The declared range is what
+  the publisher committed to and the derived one is what the pack's usage
+  needs, and which is wrong is a fact about the pack.
+- `--limit`, `--min-downloads`, `--max-zip-mb` and `--fresh` shape the run.
+  `--limit 0` takes the whole registry.
+- Archives are cached beside the ComfyUI clone, keyed by publisher, pack and
+  version. A checkpoint in `--out` holds the pinned ref, the pack selection and
+  every finished record, so an interrupted or rate-limited run resumes instead
+  of restarting. 429 and 5xx back off, honouring `Retry-After`.
+- Because the ref, the selection and the timestamp are pinned when a run
+  starts, re-running a finished crawl into the same `--out` reproduces
+  `board.json` byte for byte. That is one mechanism serving both the resume
+  requirement and the reproducibility one.
+- A pack that cannot be analysed is skipped and counted, never fatal: a 404
+  download, a 404 version record, an empty `downloadUrl`, an unpublished or
+  deprecated latest version, a corrupt archive, a transfer that stops half way,
+  an archive over the size cap, or an archive with no Python files in it. A pack with zero `comfy.*`
+  references is analysed and recorded as having no range derived.
+
+**Where the seam line was drawn.** A zip enters through the same file walk the
+directory case uses, not a parallel one. `extract.py` grew a `PackSource`
+protocol with a `DirectorySource` and a `ZipSource`; `iter_python_files` now
+walks a source's member list and `scan_pack` takes either a directory path or a
+source. Everything downstream (`resolve`, `signature`, `derive`, `report`) was
+left alone, because none of it ever knew where the bytes came from.
+`report._check_pack` was renamed to `check_pack` and made source-aware so
+`crawl` calls the same function `check` does. The one thing deliberately not
+merged is the pack selection loop: `registry.nodes_page` stays an HTTP
+primitive and the limit, the download floor and the stopping rule live in
+`crawl`, which is why `registry.iter_nodes` and `registry.total_nodes` were
+deleted rather than left as a second pagination loop next to it.
+
+Still stdlib plus `git`. The registry listing and the CDN are both public, so
+`crawl` needs no account, token or key. It does need the network, and refuses
+`--offline` rather than producing a board from whatever happens to be cached.
+
+This release also carries 1.1.1 out to PyPI, which still showed 1.1.0. The
+route hardening below ships with it.
+
 ## 1.1.1 - 2026-09-09
 
 Hardening for the HTTP route. The `target` query parameter is the only

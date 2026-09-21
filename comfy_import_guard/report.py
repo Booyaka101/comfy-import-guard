@@ -78,7 +78,7 @@ def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None, sign
     }
 
     for name, path in entries:
-        report["packs"].append(_check_pack(resolver, name, path, ledger, sig, blame_cache))
+        report["packs"].append(check_pack(resolver, name, path, ledger, sig, blame_cache))
 
     for p in report["packs"]:
         key = {SAFE: "safe", WILL_BREAK: "will_break", WARN: "warn", SKIPPED: "skipped"}[
@@ -90,11 +90,16 @@ def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None, sign
     return report
 
 
-def _check_pack(resolver, name, path, ledger, sig=None, blame_cache=None):
-    scan = scan_pack(path, name)
+def check_pack(resolver, name, pack, ledger=None, sig=None, blame_cache=None):
+    """Check one pack against the resolver's ref.
+
+    ``pack`` is whatever ``scan_pack`` takes: a directory for ``check``, a
+    ``ZipSource`` for ``crawl``.
+    """
+    scan = scan_pack(pack, name)
     out = {
-        "pack": name,
-        "path": path,
+        "pack": scan.name,
+        "path": scan.path,
         "python_files": scan.python_files,
         "references": len(scan.references),
         "vendored_comfy": scan.vendored_comfy,

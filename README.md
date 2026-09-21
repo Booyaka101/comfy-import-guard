@@ -294,6 +294,118 @@ on the largest pack measured (21s to 34s), and nothing noticeable on small ones.
 `requires-comfyui` is the [Comfy Registry field](https://docs.comfy.org/registry/specifications)
 that tells ComfyUI-Manager which ComfyUI versions your node supports.
 
+### `crawl`: which packs in the registry are already broken?
+
+For anyone who needs the picture past their own install. It walks the public
+[Comfy Registry](https://docs.comfy.org/registry/specifications) node listing,
+pulls each pack's latest `node.zip` from the CDN, and puts it through the very
+same pipeline `check` and `derive-requires` use, pinned to one ComfyUI ref. No
+account, no token, no key: the listing and the CDN are both public.
+
+```
+$ comfy-import-guard crawl --limit 20 --out .tmp-board
+comfy-import-guard: listing packs from https://api.comfy.org ...
+  [1/20] uiiiaiii-toolkit  skipped: no published version in the registry
+  [2/20] comfyui_fill-nodes 2.28.6  >=0.18.0  (271 file(s), 55 ref(s))
+  [3/20] crypswolfy69-nodes  skipped: no published version in the registry
+  [4/20] ComfyUI-DashscopeImage  skipped: no published version in the registry
+  [5/20] muse-minimax-h3-unified-loader 1.2.0  no range derived  (6 file(s), 0 ref(s))
+  [6/20] ComfyUI-Geeky-Kokoro-TTS  skipped: no published version in the registry
+  [7/20] fastloramaster  skipped: no published version in the registry
+  [8/20] comfygit-manager 0.3.0  no range derived  (99 file(s), 0 ref(s))
+  [9/20] msch-slideshow-forge 0.1.0  >=0.0.1  (16 file(s), 2 ref(s))
+  [10/20] voxcpm_sm  skipped: archive holds no Python files
+  [11/20] comfyui-modelrouter  skipped: no published version in the registry
+  [12/20] comfyui-teskors-utils 1.1.0  no range derived  (16 file(s), 0 ref(s))
+  [13/20] ComfyUI-988 1.2.1  >=0.0.1  (25 file(s), 17 ref(s))
+  [14/20] contextanchoredtilerefine 1.6.1  >=0.18.0  (12 file(s), 27 ref(s))
+  [15/20] CharacterFaceSwap  skipped: no published version in the registry
+  [16/20] comfyui-sceneweaver 0.4.0  no range derived  (17 file(s), 0 ref(s))
+  [17/20] rgthree-comfy 1.0.2608210019  >=0.0.1  (45 file(s), 8 ref(s))
+  [18/20] cinespatial 0.1.4  no range derived  (3 file(s), 0 ref(s))
+  [19/20] ComfyUI-llamacpp-helper  skipped: no published version in the registry
+  [20/20] comfyui-fal-gateway 0.5.0  no range derived  (77 file(s), 0 ref(s))
+crawl: 20 pack(s) from api.comfy.org, ComfyUI @ origin/master (b0f4b7b29)
+  analysed 11, skipped 9
+  breaks at origin/master: 0
+  registry declares a range: 2   derived by us: 5
+  of those, 0 agree, 1 disagree, 0 not comparable
+wrote .tmp-board\board.json, .tmp-board\board.md
+```
+
+`board.md` is the human summary. Packs that break at the pinned ref come
+first, with the gone symbol and its file and line, then packs whose declared
+range is disputed, then the rest by how much `comfy.*` they touch:
+
+| pack | version | refs | registry declares | derived here | agreement |
+| --- | --- | ---: | --- | --- | --- |
+| [contextanchoredtilerefine](https://github.com/Blakeem/ComfyUI-ContextAnchoredTileRefine) | 1.6.1 | 27 | `>=0.3.45` | `>=0.18.0` | disagree |
+| [comfyui_fill-nodes](https://github.com/filliptm/ComfyUI_Fill-Nodes) | 2.28.6 | 55 | - | `>=0.18.0` | registry-silent |
+| [ComfyUI-988](https://github.com/kajan988/ComfyUI-988) | 1.2.1 | 17 | - | `>=0.0.1` | registry-silent |
+| [comfyui-sceneweaver](https://github.com/EnragedAntelope/comfyui-sceneweaver) | 0.4.0 | 0 | `>=0.25.0` | - | not-derived |
+
+`board.json` is the same run for machines, with the registry's own
+`supported_comfyui_version` recorded exactly as the publisher wrote it:
+
+```json
+{
+  "id": "contextanchoredtilerefine",
+  "publisher": "blake",
+  "name": "Context-Anchored Tile Refine",
+  "version": "1.6.1",
+  "repository": "https://github.com/Blakeem/ComfyUI-ContextAnchoredTileRefine",
+  "downloads": 78,
+  "status": "analysed",
+  "skipReason": null,
+  "registry": {
+    "supportedComfyuiVersion": ">=0.3.45",
+    "declaredIn": "version"
+  },
+  "pythonFiles": 12,
+  "unparseable": [],
+  "hardReferences": 27,
+  "callSites": 23,
+  "derived": {
+    "range": ">=0.18.0",
+    "line": "requires-comfyui = \">=0.18.0\"",
+    "floorTag": "v0.18.0",
+    "ceilingTag": null,
+    "determinedBy": [
+      "comfy.model_management.intermediate_dtype"
+    ]
+  },
+  "verdictAtRef": "SAFE",
+  "removedAtRef": [],
+  "unbindableAtRef": [],
+  "breaksAtRef": false,
+  "agreement": "disagree",
+  "disagreement": "floor: registry says >=0.3.45, usage implies >=0.18.0",
+  "note": null
+}
+```
+
+When the two disagree the board says so and stops there. It does not pick a
+winner: the declared range is what the publisher committed to, the derived one
+is what the pack's `comfy.*` usage actually needs, and which is wrong is a
+judgement call about the pack, not a fact the analysis can supply.
+
+A whole-registry crawl is thousands of packs, so it is built to be stopped.
+Archives are cached under the same cache directory as the ComfyUI clone, keyed
+by publisher, pack and version. A checkpoint in `--out` holds the pinned ref,
+the pack selection and every finished record, so a run that is interrupted,
+rate-limited or killed picks up where it stopped instead of starting over. 429
+and 5xx back off (honouring `Retry-After`) before the pack is given up on.
+Budget disk for it: 20 packs came to 13 MB, so the whole registry is several
+gigabytes of archives. Delete `packs/` under the cache directory to reclaim it.
+
+Because the ref, the selection and the timestamp are all pinned at the start of
+a run, re-running a finished crawl into the same `--out` rewrites the same
+`board.json` byte for byte. Pass `--fresh` to discard the checkpoint and
+genuinely redo the work.
+
+Exit code is 1 when any pack breaks at the ref, 0 otherwise. The flags are in
+[Configuration](#configuration).
+
 ### HTTP route
 
 Installed as a node pack, it adds one read-only route:
@@ -320,6 +432,11 @@ returns `{"ok": false, "hint": "..."}` telling you which command to run once.
 | `--no-signatures` | on `check`: skip the signature pass. On `derive-requires`: derive from symbol presence only |
 | `--offline` | never touch the network; answer from the existing clone and the ledger |
 | `--no-update` | skip the `git fetch` before checking |
+| `--out DIR` | on `crawl`: where `board.json` and `board.md` go. Required |
+| `--limit N` | on `crawl`: how many packs to take, in registry order. `0` means all of them |
+| `--min-downloads N` | on `crawl`: ignore packs below a download count |
+| `--max-zip-mb N` | on `crawl`: refuse an archive bigger than this rather than expanding it |
+| `--fresh` | on `crawl`: ignore the checkpoint in `--out` and start the run over |
 | `--json` | machine-readable output for every command |
 | `--quiet` | suppress progress notes on stderr |
 
@@ -376,6 +493,15 @@ Only the public ComfyUI git repository is used. No API, no token, no account.
 - **Files this interpreter cannot parse are counted and printed**, never
   silently skipped. If you see `UNPARSED`, the pack uses syntax newer than your
   Python and that file was not analysed.
+- **A board is one ref and one moment.** `crawl` records the ComfyUI sha it
+  pinned and the registry's pack list as it stood. Comparing two boards means
+  comparing two runs at the same ref, not re-reading an old one.
+- **`~=` is not compared.** The registry's specification page describes `~=` as
+  a plain minimum, PEP 440 makes it a bounded range, and packs in the wild use
+  both readings. A declared `~=` is recorded verbatim and marked
+  `not-comparable` rather than resolved one way.
+- **`crawl` needs the network.** `--offline` is refused rather than quietly
+  producing a board from whatever happens to be cached.
 - **Not a dependency checker.** pip conflicts belong to ComfyUI-Manager. No
   auto-fixing, no runtime import hooks, no model downloads.
 
@@ -386,12 +512,18 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-124 tests. They assert against live public ComfyUI history rather than recorded
+218 tests. They assert against live public ComfyUI history rather than recorded
 fixtures: the real commits `f2b002372` and `bdcb886a4`, the real tags
 `v0.7.0`/`v0.8.0` and `v0.30.2`/`v0.31.0`, the real parameter additions behind
 issues #5355 and #12134 (`c26ca2720` and `0d720e436`), and the real
 `return_metadata` boundary at v0.3.20 that the derived floor must respect.
 They need `git` and a one-time clone, and skip cleanly if neither is available.
+
+The `crawl` tests are the exception and are fully offline: a fixture server on
+localhost serves the node listing, the version records and the `node.zip`
+archives, and can be told to return 429s, 503s, 404s, an archive with no
+length header or a dropped connection, so the backoff, the size cap, the
+checkpoint and the resume are all exercised without touching api.comfy.org.
 
 ## Publishing
 
