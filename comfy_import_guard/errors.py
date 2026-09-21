@@ -19,3 +19,11 @@ class RefError(GuardError):
 
 class BadInputError(GuardError):
     """Caller supplied a path or symbol that cannot be used."""
+
+
+class RegistryError(GuardError):
+    """The Comfy Registry API or its CDN returned something unusable."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
