@@ -98,6 +98,7 @@ def build_parser():
 
 
 def main(argv=None):
+    _keep_output_printable()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.command:
@@ -113,6 +114,20 @@ def main(argv=None):
         return 130
 
 
+def _keep_output_printable():
+    """Pack and registry names reach print(); replace what the console cannot.
+
+    A redirected stdout on Windows encodes with the locale codec, and one
+    non-ASCII pack name would otherwise end the run with UnicodeEncodeError
+    instead of a report.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def _dispatch(args):
     repo = Repo(cache_dir=args.cache_dir, offline=args.offline, quiet=args.quiet)
     ledger = Ledger(args.ledger)
@@ -125,7 +140,11 @@ def _dispatch(args):
             print("comfy-import-guard: warning: clone at %s has local modifications; "
                   "results reflect the working tree, not the ref." % repo.path, file=sys.stderr)
         rep = check(repo, args.comfy_dir, args.target, ledger, args.packs,
-                    signatures=not args.no_signatures)
+                    signatures=not args.no_signatures,
+                    log=None if args.quiet else _stderr)
+        if rep["filter_misses"]:
+            print("comfy-import-guard: warning: --pack matched no installed pack: %s"
+                  % ", ".join(rep["filter_misses"]), file=sys.stderr)
         if args.json:
             print(json.dumps(rep, indent=2))
         else:

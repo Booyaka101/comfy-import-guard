@@ -59,9 +59,22 @@ def list_packs(custom_nodes):
     return out
 
 
-def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None, signatures=True):
+def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None, signatures=True,
+          log=None):
     custom_nodes = find_custom_nodes(comfy_dir)
     entries = [(n, p) for n, p in list_packs(custom_nodes) if not packs or n in set(packs)]
+    filter_misses = sorted(set(packs) - {n for n, _ in entries}) if packs else []
+    if filter_misses and not entries:
+        installed = [n for n, _ in list_packs(custom_nodes)]
+        named = ", ".join(installed[:5])
+        extra = len(installed) - 5
+        raise BadInputError(
+            "--pack matched no installed pack: %s\n"
+            "Installed packs include: %s%s. Leave --pack out to check all of them."
+            % (", ".join(filter_misses), named or "(none)",
+               " (and %d more)" % extra if extra > 0 else "")
+        )
+    log = log or (lambda msg: None)
     resolver = Resolver(repo, target)
     sig = SignatureResolver(resolver) if signatures else None
     blame_cache = {}
@@ -72,13 +85,16 @@ def check(repo, comfy_dir, target="origin/master", ledger=None, packs=None, sign
         "target": target,
         "target_sha": repo.resolve_ref(target),
         "packs": [],
+        "filter_misses": filter_misses,
         "totals": {"packs": len(entries), "will_break": 0, "safe": 0,
                    "warn": 0, "skipped": 0, "breaking_symbols": 0,
                    "signature_drift": 0},
     }
 
-    for name, path in entries:
-        report["packs"].append(check_pack(resolver, name, path, ledger, sig, blame_cache))
+    for i, (name, path) in enumerate(entries, 1):
+        done = check_pack(resolver, name, path, ledger, sig, blame_cache)
+        report["packs"].append(done)
+        log("  [%d/%d] %s  %s" % (i, len(entries), name, done["verdict"]))
 
     for p in report["packs"]:
         key = {SAFE: "safe", WILL_BREAK: "will_break", WARN: "warn", SKIPPED: "skipped"}[

@@ -460,7 +460,10 @@ Global flags work before or after the subcommand.
    monkeypatch assignment whose replacement is a function or lambda defined in
    the same file.
 2. `git show <ref>:comfy/…/model.py` for each referenced module, parse it, and
-   build the set of names bound at module scope.
+   build the set of names bound at module scope. Existence probing does not
+   spawn git per file: one cached `git ls-tree -r` listing per ref answers
+   every "is there a module here" question for that ref as a set lookup, so
+   a check costs one listing plus one read per module it actually opens.
 3. Anything referenced but not bound is a break. `git log -S'\bsymbol\b'
    --pickaxe-regex` finds the commit that changed it; `git tag --contains` turns
    that into a release boundary.
@@ -512,7 +515,7 @@ pip install pytest
 python -m pytest tests -q
 ```
 
-218 tests. They assert against live public ComfyUI history rather than recorded
+230 tests. They assert against live public ComfyUI history rather than recorded
 fixtures: the real commits `f2b002372` and `bdcb886a4`, the real tags
 `v0.7.0`/`v0.8.0` and `v0.30.2`/`v0.31.0`, the real parameter additions behind
 issues #5355 and #12134 (`c26ca2720` and `0d720e436`), and the real

@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.3.0 - 2026-10-04
+
+Speed and honesty. The analysis was right but paid one git process per
+existence question, and a few failure paths were silent when they should have
+said something.
+
+- **One tree listing per ref.** Resolution probes module prefixes in bursts -
+  every dotted reference walks longest-prefix-first and asks "is there a file
+  here" once per step - and each of those used to spawn its own `git show`
+  (or `git cat-file` for a directory). `Repo` now holds one cached
+  `git ls-tree -r` listing per ref: the first miss loads it, every later
+  existence question for that ref is a set lookup. On a pack referencing 30
+  distinct `comfy.*` modules, the spawn count for a full check drops from 71
+  git processes to 25 with identical verdicts, and the saving grows with how
+  many distinct modules an install touches. `crawl` benefits most, since its
+  resolver is shared across every pack in the run. Refs that only ever hit -
+  blame walking candidate commits - never load the listing and pay nothing.
+- **`check` shows progress.** Each pack prints one line to stderr
+  (`[3/12] ComfyUI-TeaCache  SAFE`) as it finishes, the same shape `crawl`
+  already uses, so a big install no longer sits silent until the end. stdout
+  and `--json` are unchanged and `--quiet` suppresses it.
+- **A `--pack` filter that matches nothing is an error, not a quiet success.**
+  `check --pack typo` used to print "no custom-node packs found", exit 0, and
+  look like a pass in CI. It now exits 2 and names the packs that are
+  actually installed. A typo alongside a real match is a warning on stderr;
+  the real match is still checked and still sets the exit code.
+- **A failed refresh says so.** `git fetch` failing during `update()` used to
+  be swallowed (deliberately: answer from the clone that exists), which
+  presented last week's `origin/master` as today's. It still answers, but now
+  warns on stderr that it is answering from the refs already fetched, with
+  git's reason. `--quiet` keeps it silent.
+- **The HTTP route no longer calls a deprecated asyncio API.** The report
+  handler ran its synchronous check through `asyncio.get_event_loop()`;
+  inside a coroutine that is `asyncio.get_running_loop()`, which is what it
+  now uses.
+- **Output cannot die on a pack name.** A redirected stdout on Windows
+  encodes with the locale codec, and one non-ASCII custom-node or registry
+  name would end a run with `UnicodeEncodeError`. The CLI now reconfigures
+  stdout and stderr with `errors="replace"`: an unprintable name renders with
+  a replacement character instead of killing the report.
+
 ## 1.2.0 - 2026-09-21
 
 A `crawl` subcommand, for the question this tool could answer but could not

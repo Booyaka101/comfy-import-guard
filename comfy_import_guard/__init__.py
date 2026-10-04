@@ -6,7 +6,7 @@ ComfyUI ref. Every ComfyUI-specific import is guarded so that a plain
 ``pip install comfy-import-guard`` outside ComfyUI imports cleanly.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -96,7 +96,7 @@ def _register_routes():
                  "tag or sha such as origin/master or v0.32.0"},
                 status=400,
             )
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             data = await loop.run_in_executor(None, _build_report, target, comfy_dir)
         except Exception as exc:  # never take the server down
