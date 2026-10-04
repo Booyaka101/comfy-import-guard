@@ -192,14 +192,25 @@ def spec_from_source(source, qualname):
     return lk.spec if lk.status == FOUND else None
 
 
+# The blocks whose bodies still bind at module scope. This is the same set
+# resolve.py descends for exported names, kept in lockstep with it: a def the
+# presence check can see, the signature check must be able to see too.
+_DEF_BLOCKS = tuple(
+    n for n in (
+        ast.If, getattr(ast, "Try", None), getattr(ast, "TryStar", None),
+        ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While,
+    ) if n is not None
+)
+
+
 def _find_def(body, name):
-    """Last def/class named ``name``, descending into top-level if/try bodies."""
+    """Last def/class named ``name``, descending into top-level blocks."""
     found = None
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name == name:
                 found = node
-        elif isinstance(node, (ast.If, ast.Try)):
+        elif isinstance(node, _DEF_BLOCKS):
             for sub_body in ([node.body, getattr(node, "orelse", []) or []]
                              + [h.body for h in getattr(node, "handlers", []) or []]):
                 found = _find_def(sub_body, name) or found

@@ -116,6 +116,32 @@ def test_limit_takes_the_first_n_across_pages(crawl_repo, out_dir):
     assert board["registryTotal"] == 5
 
 
+def test_one_pack_crashing_the_analyser_is_skipped_not_fatal(crawl_repo, out_dir,
+                                                             monkeypatch):
+    """A bug in our analyser must cost one pack, not a multi-hour crawl."""
+    with FakeRegistry() as reg:
+        reg.add_pack("good", files=USES_COMFY)
+        reg.add_pack("poison", files=USES_COMFY)
+
+        real = crawl_mod.derive_requires
+
+        def exploding(repo, pack, *a, **kw):
+            if getattr(pack, "name", "") == "poison":
+                raise ValueError("synthetic analyser bug")
+            return real(repo, pack, *a, **kw)
+
+        monkeypatch.setattr(crawl_mod, "derive_requires", exploding)
+        board = run(reg, crawl_repo, out_dir)
+
+    packs = by_id(board)
+    assert packs["good"]["status"] == "analysed"
+    assert packs["good"]["derived"]["range"].startswith(">=")
+    assert packs["poison"]["status"] == SKIPPED
+    assert "analysis failed: ValueError: synthetic analyser bug" \
+        in packs["poison"]["skipReason"]
+    assert board["totals"]["analysed"] == 1
+
+
 def test_min_downloads_filters_the_selection(crawl_repo, out_dir):
     with FakeRegistry() as reg:
         reg.add_pack("popular", files=NO_COMFY, downloads=500)

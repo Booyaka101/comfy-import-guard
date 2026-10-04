@@ -45,6 +45,11 @@ SOFT_EXCEPTIONS = {
 # idiom, so it softens a call site even though it says nothing about an import.
 CALL_SOFT_EXCEPTIONS = SOFT_EXCEPTIONS | {"TypeError"}
 
+# `try/except*` guards an import exactly like `try/except` does. TryStar only
+# exists on Python 3.11+, so it joins the tuple lazily and 3.10 keeps working.
+TRY_NODES = tuple(n for n in (getattr(ast, "Try", None), getattr(ast, "TryStar", None))
+                  if n is not None)
+
 # kind values
 FROM = "from"          # from comfy.x import y
 ATTR = "attr"          # comfy.x.y  /  alias.y
@@ -345,7 +350,7 @@ def _soft_line_ranges(tree, exceptions=SOFT_EXCEPTIONS):
     """Line spans of try-bodies whose handlers swallow the relevant failure."""
     ranges = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
+        if not isinstance(node, TRY_NODES):
             continue
         if not any(_handler_is_soft(h, exceptions) for h in node.handlers):
             continue

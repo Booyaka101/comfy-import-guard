@@ -140,7 +140,12 @@ def exported_names(source):
     return names
 
 
-_BLOCKS = (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)
+_BLOCKS = tuple(
+    n for n in (
+        ast.If, getattr(ast, "Try", None), getattr(ast, "TryStar", None),
+        ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While,
+    ) if n is not None
+)
 
 
 def _collect(body, names):

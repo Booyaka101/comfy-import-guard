@@ -130,7 +130,7 @@ class Repo:
             self._log("comfy-import-guard: fetching full ComfyUI history (one time)...")
             self._git(["fetch", "--unshallow", "--tags", "--quiet"])
         elif not self.offline:
-            self._git(["fetch", "--tags", "--quiet"], check=False)
+            self._fetch(["fetch", "--tags", "--quiet"])
         self._deep = True
         self._tags = None
 
@@ -138,9 +138,24 @@ class Repo:
         """Refresh remote refs. No-op when offline."""
         if self.offline:
             return
-        self._git(["fetch", "--tags", "--quiet", "origin"], check=False)
+        self._fetch(["fetch", "--tags", "--quiet", "origin"])
         self._file_cache.clear()
         self._tags = None
+
+    def _fetch(self, args):
+        """Run a fetch, warning rather than dying when it cannot reach origin.
+
+        ``check`` must still answer from the clone that exists, but the user
+        asked for the latest ref, so a silent fallback to stale refs would
+        present yesterday's master as today's.
+        """
+        proc = self._git(args, check=False)
+        if proc.returncode != 0 and not self.quiet:
+            err = (proc.stderr or proc.stdout or "").strip().splitlines()
+            self._log("comfy-import-guard: warning: could not refresh the clone at %s; "
+                      "answering from the refs already fetched%s"
+                      % (self.path, " (%s)" % err[0] if err else ""))
+        return proc
 
     def is_dirty(self):
         """True when the cached clone has local edits, which taint ``git show``."""
@@ -172,10 +187,42 @@ class Repo:
         key = (ref, path)
         if key in self._file_cache:
             return self._file_cache[key]
+        index = self._loaded_tree(ref)
+        if index is not None and path not in index:
+            # The tree listing for this ref is already in memory and the path
+            # is not in it, so there is nothing for git show to print.
+            self._file_cache[key] = None
+            return None
         proc = self._git(["show", "%s:%s" % (ref, path)], check=False)
-        text = proc.stdout if proc.returncode == 0 else None
+        if proc.returncode == 0:
+            text = proc.stdout
+        else:
+            text = None
+            # A miss is existence probing, which resolution does in bursts:
+            # every module prefix of a dotted path costs a lookup. Load the
+            # whole tree listing once so the remaining misses for this ref
+            # cost nothing. Refs that only ever hit (blame walking candidate
+            # commits) never reach this line and never pay for it.
+            self.tree_files(ref)
         self._file_cache[key] = text
         return text
+
+    def tree_files(self, ref):
+        """Every file path under ``ref``'s tree, as one cached listing.
+
+        One ``ls-tree`` per ref answers every later existence question for
+        that ref; a probe per file would spawn one git process per miss.
+        """
+        key = ("tree-index", ref)
+        if key not in self._file_cache:
+            proc = self._git(["ls-tree", "-r", "-z", "--name-only", ref], check=False)
+            self._file_cache[key] = frozenset(
+                p for p in proc.stdout.split("\0") if p)
+        return self._file_cache[key]
+
+    def _loaded_tree(self, ref):
+        """The cached tree listing for ``ref``, or None when it is not loaded."""
+        return self._file_cache.get(("tree-index", ref))
 
     def is_dir(self, ref, path):
         """True when ``path`` is a directory at ``ref``.
@@ -187,8 +234,8 @@ class Repo:
         key = ("tree", ref, path)
         if key in self._file_cache:
             return self._file_cache[key]
-        proc = self._git(["cat-file", "-t", "%s:%s" % (ref, path)], check=False)
-        result = proc.stdout.strip() == "tree"
+        prefix = path.strip("/") + "/"
+        result = any(p.startswith(prefix) for p in self.tree_files(ref))
         self._file_cache[key] = result
         return result
 

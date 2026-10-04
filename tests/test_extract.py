@@ -2,6 +2,9 @@
 
 import ast
 import os
+import sys
+
+import pytest
 
 from comfy_import_guard.extract import (
     ATTR,
@@ -89,6 +92,18 @@ def test_try_except_importerror_marks_soft():
         "try:\n"
         "    from comfy.ldm.minimax.model import time_shift_slope\n"
         "except ImportError:\n"
+        "    time_shift_slope = None\n"
+    )
+    assert len(rs) == 1
+    assert rs[0].soft is True
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="except* syntax needs 3.11+")
+def test_except_star_importerror_marks_soft_too():
+    rs = refs(
+        "try:\n"
+        "    from comfy.ldm.minimax.model import time_shift_slope\n"
+        "except* ImportError:\n"
         "    time_shift_slope = None\n"
     )
     assert len(rs) == 1
