@@ -64,6 +64,8 @@ def build_parser():
     c.add_argument("--no-update", action="store_true", help="skip git fetch")
     c.add_argument("--no-signatures", action="store_true",
                    help="skip call-site and monkeypatch signature checks")
+    c.add_argument("--strict", action="store_true",
+                   help="exit 1 when any pack warns as well, not only when one will break")
 
     b = sub.add_parser("blame", help="name the commit and PR that removed a symbol")
     b.add_argument("symbol", help="e.g. comfy.ldm.minimax.model.time_shift_slope")
@@ -149,7 +151,9 @@ def _dispatch(args):
             print(json.dumps(rep, indent=2))
         else:
             _print_check(rep)
-        return 1 if rep["totals"]["will_break"] else 0
+        failing = rep["totals"]["will_break"] or (
+            args.strict and rep["totals"]["warn"])
+        return 1 if failing else 0
 
     if args.command == "blame":
         if args.param:

@@ -68,3 +68,19 @@ def test_json_report_stays_parseable(install, capsys):
     assert rep["totals"]["packs"] == 2
     assert rep["filter_misses"] == []
     assert [p["pack"] for p in rep["packs"]] == ["ancient_pack", "recent_pack"]
+
+
+def _add_warn_pack(root):
+    """A star import is unresolvable, which grades the pack WARN."""
+    warn = os.path.join(root, "custom_nodes", "warn_pack")
+    os.makedirs(warn, exist_ok=True)
+    with open(os.path.join(warn, "__init__.py"), "w") as fh:
+        fh.write("from comfy.utils import *\n")
+
+
+def test_warn_exits_zero_without_strict_and_one_with_it(install, capsys):
+    _add_warn_pack(install)
+    assert main(["check", "--comfy-dir", install] + OFFLINE) == 0
+    assert main(["check", "--comfy-dir", install, "--strict"] + OFFLINE) == 1
+    out = capsys.readouterr().out
+    assert out.count("[??] warn_pack  WARN") == 2   # both runs still report it

@@ -36,6 +36,26 @@ def spec(source, qualname="f"):
     return s
 
 
+def test_def_inside_a_top_level_block_is_found_as_presence_finds_it():
+    """exported_names descends into top-level with/for/while; so must we.
+
+    The two halves of the engine have to agree on what "bound at module
+    scope" means, or a call site the presence check can resolve gets silently
+    dropped from signature checking.
+    """
+    from comfy_import_guard.resolve import exported_names
+
+    source = (
+        "import torch\n"
+        "with torch.no_grad():\n"
+        "    def compute(x, y=1):\n"
+        "        return x + y\n"
+    )
+    assert "compute" in exported_names(source)
+    s = spec(source, "compute")
+    assert s.args == ("x", "y") and s.defaults == 1
+
+
 # ------------------------------------------------------------ ParamSpec
 
 

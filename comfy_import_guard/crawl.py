@@ -25,7 +25,7 @@ from pathlib import Path
 
 from . import __version__
 from .derive import derive_requires
-from .errors import BadInputError, RegistryError
+from .errors import BadInputError, GuardError, RegistryError
 from .extract import ZipSource
 from .registry import MAX_PAGE_LIMIT, NODES_PATH, RegistryClient
 from .report import WILL_BREAK, check_pack
@@ -105,7 +105,19 @@ def crawl(repo, out_dir, client=None, limit=DEFAULT_LIMIT, target="origin/master
                          max_zip_bytes, ledger)
     try:
         for i, entry in enumerate(pending, 1):
-            record = analyser.run(entry)
+            try:
+                record = analyser.run(entry)
+            except GuardError:
+                # Deliberate control flow, not a crash: a network that stays
+                # down through the backoff ends the run so the checkpoint can
+                # resume it, rather than skipping every remaining pack.
+                raise
+            except Exception as exc:
+                # One pack tripping a bug in the analyser is that pack's skip
+                # reason, not the end of a multi-hour crawl. The checkpoint
+                # already holds every pack before it.
+                record = _skip(_blank(entry),
+                               "analysis failed: %s: %s" % (type(exc).__name__, exc))
             state["packs"].append(record)
             log("  [%d/%d] %s" % (len(done) + i, total, _progress(record)))
             if i % CHECKPOINT_EVERY == 0:

@@ -40,6 +40,29 @@ said something.
   name would end a run with `UnicodeEncodeError`. The CLI now reconfigures
   stdout and stderr with `errors="replace"`: an unprintable name renders with
   a replacement character instead of killing the report.
+- **`except* ImportError` now softens an import.** Exception-group handlers
+  (`ast.TryStar`, Python 3.11+) guard an import exactly like `except`
+  does, but the softness walk only looked at `ast.Try`, so a pack written
+  with `except*` got a false WILL BREAK from a guard its author wrote on
+  purpose. The exported-name collector had the same blind spot and now
+  descends `except*` blocks too.
+- **The two halves of the engine agree on what "module scope" means.**
+  Presence checking (`exported_names`) descends top-level
+  `with`/`for`/`while` blocks because names bound there still bind at module
+  scope; the signature lookup (`_find_def`) only descended `if`/`try`. A
+  `def` under a top-level `with` was PRESENT to the import check and
+  UNRESOLVED to the signature check, so calls to it silently escaped binding
+  checks. Both now walk the same set of blocks.
+- **A pack that crashes the analyser is skipped, not fatal, in `crawl`.** An
+  unexpected exception during one pack's analysis is recorded as that pack's
+  skip reason and the crawl continues; a multi-hour registry run no longer
+  dies on pack 4,000 of 5,667 because of a bug in this tool. Deliberate
+  `GuardError`s still stop the run - a network that stays down through the
+  backoff ends the crawl so the checkpoint can resume it, rather than
+  skipping every remaining pack.
+- **`check --strict` fails on WARN as well as WILL BREAK.** Exit code 1 is
+  normally reserved for a guaranteed break; `--strict` makes a pack that only
+  fails guarded, or that could not be fully resolved statically, fail CI too.
 
 ## 1.2.0 - 2026-09-21
 
