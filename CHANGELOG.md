@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 - 2026-11-02
 
 - Harden scope tracking against wildcard imports and resolve `global`/`nonlocal`
   reads and writes to the correct owner without invalidating unrelated locals.
