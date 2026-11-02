@@ -185,7 +185,8 @@ def test_external_rebinding_stays_conservative(declaration):
         "    def change():\n        " + declaration + "\n        api = object()\n"
         "    api.fake()\n"
     )
-    assert refs == calls == []
+    expected = ["comfy.lora.fake"] if declaration.startswith("global") else []
+    assert [r.dotted for r in refs] == [c.dotted for c in calls] == expected
 
 
 def test_same_named_replacement_functions_are_scoped():

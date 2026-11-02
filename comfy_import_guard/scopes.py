@@ -14,7 +14,8 @@ class _Scope:
         self.parent = parent
         self.kind = kind
         self.bindings = {}
-        self.external = set()
+        self.external = {}
+        self.wildcard = False
 
     def bind(self, name, value=None):
         if name in self.bindings and self.bindings[name] != value:
@@ -28,24 +29,47 @@ class ScopeIndex(ast.NodeVisitor):
         self.scopes = [self.scope]
         self.by_node = {}
         self._maps = {}
+        self.deferred_annotations = any(
+            isinstance(node, ast.ImportFrom) and node.module == "__future__" and
+            any(alias.name == "annotations" for alias in node.names)
+            for node in getattr(tree, "body", ())
+        )
         self.visit(tree)
         # Writes through global/nonlocal can affect callers in other scopes.
         # Do not guess when those functions run, or which write wins.
         for scope in self.scopes:
             for name in scope.external:
-                scope.bindings[name] = None
-                parent = scope.parent
-                while parent is not None:
-                    if name in parent.bindings:
-                        parent.bindings[name] = None
-                    parent = parent.parent
+                if name in scope.bindings:
+                    owner = self._external_owner(scope, name)
+                    if owner is not None:
+                        owner.bindings[name] = None
+                    del scope.bindings[name]
 
     def visit(self, node):
         self.by_node[node] = self.scope
         return super().visit(node)
 
+    def _external_owner(self, scope, name):
+        if scope.external[name] == "global":
+            return self.scopes[0]
+        parent = scope.parent
+        while parent is not None and parent.kind != "module":
+            if parent.kind != "class" and name in parent.bindings and name not in parent.external:
+                return parent
+            parent = parent.parent
+        return None
+
     def _lookup(self, scope, name):
         while scope is not None:
+            if name in scope.external:
+                owner = self._external_owner(scope, name)
+                if owner is None:
+                    return scope, None
+                scope = owner
+            # A wildcard may replace any name, including getattr/setattr. Keep
+            # explicit import references, but do not guess its unknown exports.
+            if scope.wildcard:
+                return scope, None
             if name in scope.bindings:
                 return scope, scope.bindings[name]
             scope = scope.parent
@@ -116,6 +140,7 @@ class ScopeIndex(ast.NodeVisitor):
     def visit_ImportFrom(self, node):
         for alias in node.names:
             if alias.name == "*":
+                self.scope.wildcard = True
                 continue
             path = "%s.%s" % (node.module, alias.name)
             binding = ("path", path) if not node.level and node.module and _is_comfy(node.module) else None
@@ -126,6 +151,19 @@ class ScopeIndex(ast.NodeVisitor):
         binding = ("alias", node.value) if isinstance(node.value, (ast.Name, ast.Attribute)) else None
         for target in node.targets:
             self._target(target, binding)
+
+    def visit_AnnAssign(self, node):
+        if node.value is not None:
+            self.visit(node.value)
+            binding = ("alias", node.value) if isinstance(node.value, (ast.Name, ast.Attribute)) else None
+            self._target(node.target, binding)
+        elif isinstance(node.target, ast.Name) and self.scope.kind != "function":
+            # At module/class scope this records an annotation, not a value.
+            self.by_node[node.target] = self.scope
+        else:
+            self._target(node.target)
+        if not self.deferred_annotations and self.scope.kind != "function":
+            self.visit(node.annotation)
 
     def visit_NamedExpr(self, node):
         self.visit(node.value)
@@ -142,9 +180,11 @@ class ScopeIndex(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Global(self, node):
-        self.scope.external.update(node.names)
+        if self.scope.kind != "module":
+            self.scope.external.update((name, "global") for name in node.names)
 
-    visit_Nonlocal = visit_Global
+    def visit_Nonlocal(self, node):
+        self.scope.external.update((name, "nonlocal") for name in node.names)
 
     def visit_MatchAs(self, node):
         if node.name:
@@ -167,10 +207,10 @@ class ScopeIndex(ast.NodeVisitor):
 
     def _arguments(self, args):
         for arg in args.posonlyargs + args.args + args.kwonlyargs:
-            if arg.annotation:
+            if arg.annotation and not self.deferred_annotations:
                 self.visit(arg.annotation)
         for arg in (args.vararg, args.kwarg):
-            if arg is not None and arg.annotation:
+            if arg is not None and arg.annotation and not self.deferred_annotations:
                 self.visit(arg.annotation)
         for default in args.defaults + args.kw_defaults:
             if default is not None:
@@ -191,8 +231,7 @@ class ScopeIndex(ast.NodeVisitor):
             self.scope = _Scope(outer, "annotation")
             self.scopes.append(self.scope)
             self._type_parameters(node)
-            for parameter in node.type_params:
-                self.visit(parameter)
+            # Bounds, constraints and defaults of type parameters are lazy.
         return outer
 
     def visit_FunctionDef(self, node):
@@ -202,7 +241,7 @@ class ScopeIndex(ast.NodeVisitor):
             self.visit(decorator)
         outer = self._header(node)
         self._arguments(node.args)
-        if node.returns:
+        if node.returns and not self.deferred_annotations:
             self.visit(node.returns)
         self.scope = outer
         self._enter("function")

@@ -494,6 +494,12 @@ Only the public ComfyUI git repository is used. No API, no token, no account.
   scope. Conflicting writes invalidate a name throughout its own scope, regardless
   of statement order. Branch-dependent bindings and `global`/`nonlocal` rebinding
   stay conservative and can hide real findings rather than invent hard failures.
+  Read-only `global`/`nonlocal` declarations resolve to their owning scope; writes
+  invalidate only that owner. Wildcard imports make their scope's aliases and
+  reflection builtins uncertain. Annotation-only declarations do not replace
+  module/class values, and annotated assignments can preserve saved aliases.
+  Deferred annotations, function-local variable annotations and lazy type alias
+  expressions or type-parameter bounds are not treated as eager call sites.
 - **Signature checks cover parameter lists, not behaviour.** A changed return
   type, a changed default value, or changed semantics behind an unchanged
   parameter list are all still invisible. Calls that spread `*args`/`**kwargs`,

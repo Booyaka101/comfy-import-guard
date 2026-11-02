@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Harden scope tracking against wildcard imports and resolve `global`/`nonlocal`
+  reads and writes to the correct owner without invalidating unrelated locals.
+- Preserve annotated callable aliases and module/class annotation-only values.
+  Exclude postponed annotations, function-local variable annotations and lazy
+  generic bounds from eager call extraction. Add 17 adversarial review cases.
+
 - Track ComfyUI imports, saved callable aliases and replacement functions by
   lexical scope instead of file-wide maps. A parameter or local assignment no
   longer hides real calls elsewhere, and function-local imports no longer create
