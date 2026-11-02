@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.4.0 - 2026-11-02
+
+- Harden scope tracking against wildcard imports and resolve `global`/`nonlocal`
+  reads and writes to the correct owner without invalidating unrelated locals.
+- Preserve annotated callable aliases and module/class annotation-only values.
+  Exclude postponed annotations, function-local variable annotations and lazy
+  generic bounds from eager call extraction. Add 17 adversarial review cases.
+
+- Track ComfyUI imports, saved callable aliases and replacement functions by
+  lexical scope instead of file-wide maps. A parameter or local assignment no
+  longer hides real calls elsewhere, and function-local imports no longer create
+  false references in sibling functions or module code.
+- Apply the same bindings to attribute references, literal `getattr`, calls,
+  assignment monkeypatches and literal `setattr`. Respect function and lambda
+  parameters, closure bindings, class/method boundaries, comprehension targets,
+  pattern captures and shadowed reflection builtins.
+- Keep conflicting writes and external rebinding conservative, without importing
+  pack code or adding runtime dependencies. Add scope regressions including
+  saved aliases, replacement signatures, source locations and guarded calls.
+
 ## 1.3.0 - 2026-10-04
 
 Speed and honesty. The analysis was right but paid one git process per

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from .errors import BadInputError
 from .signature import ParamSpec, name_of
+from .scopes import ScopeIndex, _is_comfy
 
 SKIP_DIRS = {
     "__pycache__",
@@ -287,10 +288,10 @@ def scan_pack(pack, name=None):
 def extract_references(tree, filename):
     """All comfy.* references in one parsed module."""
     soft = _soft_line_ranges(tree)
-    aliases = _alias_map(tree)
+    scopes = ScopeIndex(tree)
     refs = []
     refs.extend(_import_refs(tree, filename, soft))
-    refs.extend(_attribute_refs(tree, filename, aliases, soft))
+    refs.extend(_attribute_refs(tree, filename, scopes, soft))
     return refs
 
 
@@ -302,30 +303,24 @@ def extract_calls(tree, filename):
     which fits the Reference model.
     """
     soft = _soft_line_ranges(tree, CALL_SOFT_EXCEPTIONS)
-    aliases = _alias_map(tree)
-    if not aliases:
-        return [], []
-    defs = _function_def_map(tree)
-    # `orig = comfy.lora.calculate_weight` binds a local alias to a callable;
-    # a later `orig(...)` is a call site against that dotted path. This map is
-    # deliberately not fed into _attribute_refs, which keeps reference
-    # extraction byte-identical to 1.0.x.
-    value_aliases = _value_alias_map(tree, aliases)
-    shadowed = _shadowed_names(tree, aliases)
+    scopes = ScopeIndex(tree)
     calls = []
     patches = []
     for node in ast.walk(tree):
+        if node not in scopes.by_node:
+            continue
+        aliases, defs = scopes.maps(node)
         if isinstance(node, ast.Assign):
             patches.extend(_patches_from_assign(node, aliases, defs, filename, soft))
         elif isinstance(node, ast.Call):
-            if _is_getattr(node):
+            if _is_getattr(node) and scopes.is_builtin(node, "getattr"):
                 continue
-            if _is_setattr(node):
+            if _is_setattr(node) and scopes.is_builtin(node, "setattr"):
                 patch = _patch_from_setattr(node, aliases, defs, filename, soft)
                 if patch:
                     patches.append(patch)
                 continue
-            dotted = _call_target(node.func, aliases, value_aliases, shadowed)
+            dotted = _chain(node.func, aliases)
             if not dotted or len(dotted.split(".")) < 2:
                 continue
             calls.append(CallSite(
@@ -373,35 +368,6 @@ def _handler_is_soft(handler, exceptions=SOFT_EXCEPTIONS):
     return any(n in exceptions for n in names if n)
 
 
-def _alias_map(tree):
-    """Local name -> comfy dotted module it is bound to."""
-    aliases = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for a in node.names:
-                if not _is_comfy(a.name):
-                    continue
-                if a.asname:
-                    aliases[a.asname] = a.name
-                else:
-                    # `import comfy.ldm.x` binds the top package name only.
-                    aliases[a.name.split(".")[0]] = a.name.split(".")[0]
-        elif isinstance(node, ast.ImportFrom):
-            if node.level or not node.module or not _is_comfy(node.module):
-                continue
-            for a in node.names:
-                if a.name == "*":
-                    continue
-                # `from comfy import model_management` may bind a submodule; the
-                # resolver decides. Binding it here lets attribute chains through.
-                aliases[a.asname or a.name] = "%s.%s" % (node.module, a.name)
-    return aliases
-
-
-def _is_comfy(dotted):
-    return dotted == "comfy" or dotted.startswith("comfy.")
-
-
 def _import_refs(tree, filename, soft):
     refs = []
     for node in ast.walk(tree):
@@ -422,10 +388,8 @@ def _import_refs(tree, filename, soft):
     return refs
 
 
-def _attribute_refs(tree, filename, aliases, soft):
+def _attribute_refs(tree, filename, scopes, soft):
     """Outermost attribute chains rooted at a comfy alias, plus getattr()."""
-    if not aliases:
-        return []
     inner = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute):
@@ -433,7 +397,11 @@ def _attribute_refs(tree, filename, aliases, soft):
 
     refs = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _is_getattr(node) and len(node.args) >= 2:
+        if node not in scopes.by_node:
+            continue
+        aliases, _ = scopes.maps(node)
+        if (isinstance(node, ast.Call) and _is_getattr(node) and
+                scopes.is_builtin(node, "getattr") and len(node.args) >= 2):
             dotted = _chain(node.args[0], aliases)
             target = node.args[1]
             if dotted and isinstance(target, ast.Constant) and isinstance(target.value, str):
@@ -463,134 +431,6 @@ def _is_getattr(call):
 
 def _is_setattr(call):
     return isinstance(call.func, ast.Name) and call.func.id == "setattr"
-
-
-def _call_target(func, aliases, value_aliases, shadowed):
-    """Dotted comfy path a call's ``func`` resolves to, or None.
-
-    A name the file rebinds to anything else is not this callable any more, so
-    it yields None. Presence checking can afford to be loose about shadowing
-    and grade the result WARN; a call site cannot, because a bad bind is a
-    hard WILL BREAK.
-    """
-    if isinstance(func, ast.Attribute):
-        root = _chain_root(func)
-        return None if root in shadowed else _chain(func, aliases)
-    if isinstance(func, ast.Name):
-        if func.id in shadowed:
-            return None
-        dotted = value_aliases.get(func.id) or aliases.get(func.id)
-        if dotted and _is_comfy(dotted):
-            return dotted
-    return None
-
-
-def _chain_root(node):
-    """Name at the root of an attribute chain, or None."""
-    while isinstance(node, ast.Attribute):
-        node = node.value
-    return node.id if isinstance(node, ast.Name) else None
-
-
-def _shadowed_names(tree, aliases):
-    """Names this file rebinds away from whatever the imports bound them to.
-
-    Deliberately file-wide and conservative: a parameter named
-    ``calculate_weight`` in one function disqualifies the name everywhere in
-    the file. Losing a real finding costs a missed warning; keeping a bad one
-    fails somebody's CI on working code.
-    """
-    out = set()
-
-    def bind(target, ok=False):
-        if isinstance(target, ast.Name):
-            if not ok:
-                out.add(target.id)
-        elif isinstance(target, (ast.Tuple, ast.List)):
-            for el in target.elts:
-                bind(el)
-        elif isinstance(target, ast.Starred):
-            bind(target.value)
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            # An assignment from a comfy chain is what value aliases are made
-            # of, so it does not shadow; anything else does.
-            keep = _chain(node.value, aliases) is not None
-            for t in node.targets:
-                bind(t, ok=keep)
-        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-            bind(node.target)
-        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
-            bind(node.target)
-        elif isinstance(node, ast.NamedExpr):
-            bind(node.target)
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if item.optional_vars is not None:
-                    bind(item.optional_vars)
-        elif isinstance(node, ast.ExceptHandler):
-            if node.name:
-                out.add(node.name)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out.add(node.name)
-            out.update(_arg_names(node.args))
-        elif isinstance(node, ast.Lambda):
-            out.update(_arg_names(node.args))
-        elif isinstance(node, ast.ClassDef):
-            out.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            module = getattr(node, "module", None)
-            if isinstance(node, ast.ImportFrom) and not node.level and module and _is_comfy(module):
-                continue
-            for a in node.names:
-                if isinstance(node, ast.Import) and _is_comfy(a.name):
-                    continue
-                if a.name != "*":
-                    out.add(a.asname or a.name.split(".")[0])
-    return out
-
-
-def _arg_names(args):
-    names = [a.arg for a in list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)]
-    for extra in (args.vararg, args.kwarg):
-        if extra is not None:
-            names.append(extra.arg)
-    return names
-
-
-def _function_def_map(tree):
-    """Name -> parameter spec for every plain function defined in this file.
-
-    A decorated def, or two same-named defs whose parameter lists differ, maps
-    to None: the actual signature is not statically knowable, and a wrong
-    verdict is worse than silence.
-    """
-    out = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        spec = None if node.decorator_list else ParamSpec.from_arguments(node.args)
-        if node.name in out and out[node.name] != spec:
-            out[node.name] = None
-        else:
-            out[node.name] = spec
-    return out
-
-
-def _value_alias_map(tree, aliases):
-    """Local name -> comfy dotted path, from ``name = comfy.x.y`` assignments."""
-    out = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name) or not isinstance(node.value, ast.Attribute):
-            continue
-        dotted = _chain(node.value, aliases)
-        if dotted and len(dotted.split(".")) >= 2:
-            out[target.id] = dotted
-    return out
 
 
 def _patches_from_assign(node, aliases, defs, filename, soft):

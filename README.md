@@ -486,11 +486,20 @@ Only the public ComfyUI git repository is used. No API, no token, no account.
 - **`from comfy.x import *`** is reported as unresolvable, not guessed.
 - **Attribute chains are best-effort.** `comfy.samplers.KSampler.SAMPLERS`
   is checked as far as `KSampler`; class internals are not tracked.
-- **Local shadowing is not modelled for references.** A local variable that
-  happens to reuse an alias name can produce a spurious reference. It shows up
-  as `WARN`/`MISSING` with a file and line, so it is cheap to dismiss. Call
-  sites are held to a stricter rule, because a bad bind is a hard failure: any
-  name the file rebinds is dropped from signature checking entirely.
+- **Bindings are lexical, not execution-flow analysis.** References, calls and
+  monkeypatches share scope-aware import and alias tracking. Parameters, local
+  imports and assignments do not leak into sibling functions. Lambdas,
+  comprehensions and class bodies have separate bindings; methods do not inherit
+  bare names from the class namespace. Defaults and decorators use the enclosing
+  scope. Conflicting writes invalidate a name throughout its own scope, regardless
+  of statement order. Branch-dependent bindings and `global`/`nonlocal` rebinding
+  stay conservative and can hide real findings rather than invent hard failures.
+  Read-only `global`/`nonlocal` declarations resolve to their owning scope; writes
+  invalidate only that owner. Wildcard imports make their scope's aliases and
+  reflection builtins uncertain. Annotation-only declarations do not replace
+  module/class values, and annotated assignments can preserve saved aliases.
+  Deferred annotations, function-local variable annotations and lazy type alias
+  expressions or type-parameter bounds are not treated as eager call sites.
 - **Signature checks cover parameter lists, not behaviour.** A changed return
   type, a changed default value, or changed semantics behind an unchanged
   parameter list are all still invisible. Calls that spread `*args`/`**kwargs`,

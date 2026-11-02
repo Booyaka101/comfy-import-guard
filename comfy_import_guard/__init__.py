@@ -6,7 +6,7 @@ ComfyUI ref. Every ComfyUI-specific import is guarded so that a plain
 ``pip install comfy-import-guard`` outside ComfyUI imports cleanly.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
